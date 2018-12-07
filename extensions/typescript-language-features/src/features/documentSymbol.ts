@@ -8,6 +8,7 @@ import * as Proto from '../protocol';
 import * as PConst from '../protocol.const';
 import { ITypeScriptServiceClient } from '../typescriptService';
 import * as typeConverters from '../utils/typeConverters';
+import { CachedResponse } from './baseCodeLensProvider';
 
 const getSymbolKind = (kind: string): vscode.SymbolKind => {
 	switch (kind) {
@@ -22,7 +23,6 @@ const getSymbolKind = (kind: string): vscode.SymbolKind => {
 		case PConst.Kind.variable: return vscode.SymbolKind.Variable;
 		case PConst.Kind.const: return vscode.SymbolKind.Variable;
 		case PConst.Kind.localVariable: return vscode.SymbolKind.Variable;
-		case PConst.Kind.variable: return vscode.SymbolKind.Variable;
 		case PConst.Kind.function: return vscode.SymbolKind.Function;
 		case PConst.Kind.localFunction: return vscode.SymbolKind.Function;
 	}
@@ -31,7 +31,8 @@ const getSymbolKind = (kind: string): vscode.SymbolKind => {
 
 class TypeScriptDocumentSymbolProvider implements vscode.DocumentSymbolProvider {
 	public constructor(
-		private readonly client: ITypeScriptServiceClient
+		private readonly client: ITypeScriptServiceClient,
+		private cachedResponse: CachedResponse<Proto.NavTreeResponse>,
 	) { }
 
 	public async provideDocumentSymbols(resource: vscode.TextDocument, token: vscode.CancellationToken): Promise<vscode.DocumentSymbol[] | undefined> {
@@ -40,18 +41,13 @@ class TypeScriptDocumentSymbolProvider implements vscode.DocumentSymbolProvider 
 			return undefined;
 		}
 
-		let tree: Proto.NavigationTree;
-		try {
-			const args: Proto.FileRequestArgs = { file };
-			const { body } = await this.client.execute('navtree', args, token);
-			if (!body) {
-				return undefined;
-			}
-			tree = body;
-		} catch {
+		const args: Proto.FileRequestArgs = { file };
+		const response = await this.cachedResponse.execute(resource, () => this.client.execute('navtree', args, token));
+		if (!response || response.type !== 'response' || !response.body) {
 			return undefined;
 		}
 
+		let tree = response.body;
 		if (tree && tree.childItems) {
 			// The root represents the file. Ignore this when showing in the UI
 			const result: vscode.DocumentSymbol[] = [];
@@ -103,7 +99,8 @@ class TypeScriptDocumentSymbolProvider implements vscode.DocumentSymbolProvider 
 export function register(
 	selector: vscode.DocumentSelector,
 	client: ITypeScriptServiceClient,
+	cachedResponse: CachedResponse<Proto.NavTreeResponse>,
 ) {
 	return vscode.languages.registerDocumentSymbolProvider(selector,
-		new TypeScriptDocumentSymbolProvider(client));
+		new TypeScriptDocumentSymbolProvider(client, cachedResponse), { label: 'TypeScript' });
 }

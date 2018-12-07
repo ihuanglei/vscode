@@ -3,16 +3,14 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
-
-export enum MessageType {
+export const enum MessageType {
 	Initialized,
 	Ready,
 	Terminate
 }
 
 export function createMessageOfType(type: MessageType): Buffer {
-	const result = new Buffer(1);
+	const result = Buffer.allocUnsafe(1);
 
 	switch (type) {
 		case MessageType.Initialized: result.writeUInt8(1, 0); break;

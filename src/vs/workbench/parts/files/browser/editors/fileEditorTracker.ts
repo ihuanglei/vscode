@@ -2,10 +2,9 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-'use strict';
 
 import { IWorkbenchContribution } from 'vs/workbench/common/contributions';
-import URI from 'vs/base/common/uri';
+import { URI } from 'vs/base/common/uri';
 import * as resources from 'vs/base/common/resources';
 import { IEditorViewState } from 'vs/editor/common/editorCommon';
 import { toResource, SideBySideEditorInput, IWorkbenchEditorConfiguration } from 'vs/workbench/common/editor';
@@ -315,7 +314,7 @@ export class FileEditorTracker extends Disposable implements IWorkbenchContribut
 		// to have a size of 2 (1 running load and 1 queued load).
 		const queue = this.modelLoadQueue.queueFor(model.getResource());
 		if (queue.size <= 1) {
-			queue.queue(() => model.load().then(null, onUnexpectedError));
+			queue.queue(() => model.load().then<void>(null, onUnexpectedError));
 		}
 	}
 
