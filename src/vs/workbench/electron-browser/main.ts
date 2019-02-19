@@ -5,14 +5,14 @@
 
 import * as nls from 'vs/nls';
 import * as perf from 'vs/base/common/performance';
-import { WorkbenchShell } from 'vs/workbench/electron-browser/shell';
+import { Workbench } from 'vs/workbench/electron-browser/workbench';
+import { ElectronWindow } from 'vs/workbench/electron-browser/window';
 import * as browser from 'vs/base/browser/browser';
 import { domContentLoaded } from 'vs/base/browser/dom';
 import { onUnexpectedError } from 'vs/base/common/errors';
 import * as comparer from 'vs/base/common/comparers';
 import * as platform from 'vs/base/common/platform';
 import { URI as uri } from 'vs/base/common/uri';
-import { IWorkspaceContextService, Workspace, WorkbenchState } from 'vs/platform/workspace/common/workspace';
 import { WorkspaceService } from 'vs/workbench/services/configuration/node/configurationService';
 import { SyncDescriptor } from 'vs/platform/instantiation/common/descriptors';
 import { ServiceCollection } from 'vs/platform/instantiation/common/serviceCollection';
@@ -22,7 +22,6 @@ import * as gracefulFs from 'graceful-fs';
 import { KeyboardMapperFactory } from 'vs/workbench/services/keybinding/electron-browser/keybindingService';
 import { IWindowConfiguration, IWindowsService } from 'vs/platform/windows/common/windows';
 import { WindowsChannelClient } from 'vs/platform/windows/node/windowsIpc';
-import { IStorageLegacyService, StorageLegacyService, inMemoryLocalStorageInstance, IStorageLegacy } from 'vs/platform/storage/common/storageLegacyService';
 import { IEnvironmentService } from 'vs/platform/environment/common/environment';
 import { Client as ElectronIPCClient } from 'vs/base/parts/ipc/electron-browser/ipc.electron-browser';
 import { webFrame } from 'electron';
@@ -31,11 +30,11 @@ import { IUpdateService } from 'vs/platform/update/common/update';
 import { URLHandlerChannel, URLServiceChannelClient } from 'vs/platform/url/node/urlIpc';
 import { IURLService } from 'vs/platform/url/common/url';
 import { WorkspacesChannelClient } from 'vs/platform/workspaces/node/workspacesIpc';
-import { IWorkspacesService, ISingleFolderWorkspaceIdentifier, IWorkspaceInitializationPayload, IMultiFolderWorkspaceInitializationPayload, IEmptyWorkspaceInitializationPayload, ISingleFolderWorkspaceInitializationPayload } from 'vs/platform/workspaces/common/workspaces';
+import { IWorkspacesService, ISingleFolderWorkspaceIdentifier, IWorkspaceInitializationPayload, IMultiFolderWorkspaceInitializationPayload, IEmptyWorkspaceInitializationPayload, ISingleFolderWorkspaceInitializationPayload, reviveWorkspaceIdentifier } from 'vs/platform/workspaces/common/workspaces';
 import { createSpdLogService } from 'vs/platform/log/node/spdlogService';
 import * as fs from 'fs';
 import { ConsoleLogService, MultiplexLogService, ILogService } from 'vs/platform/log/common/log';
-import { StorageService, DelegatingStorageService } from 'vs/platform/storage/node/storageService';
+import { StorageService } from 'vs/platform/storage/node/storageService';
 import { IssueChannelClient } from 'vs/platform/issue/node/issueIpc';
 import { IIssueService } from 'vs/platform/issue/common/issue';
 import { LogLevelSetterChannelClient, FollowerLogService } from 'vs/platform/log/node/logIpc';
@@ -44,288 +43,285 @@ import { MenubarChannelClient } from 'vs/platform/menubar/node/menubarIpc';
 import { IMenubarService } from 'vs/platform/menubar/common/menubar';
 import { Schemas } from 'vs/base/common/network';
 import { sanitizeFilePath } from 'vs/base/node/extfs';
-import { basename } from 'path';
+import { basename } from 'vs/base/common/path';
 import { createHash } from 'crypto';
 import { IdleValue } from 'vs/base/common/async';
 import { setGlobalLeakWarningThreshold } from 'vs/base/common/event';
 import { GlobalStorageDatabaseChannelClient } from 'vs/platform/storage/node/storageIpc';
+import { IWorkspaceContextService } from 'vs/platform/workspace/common/workspace';
+import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
+import { IStorageService } from 'vs/platform/storage/common/storage';
+import { InstantiationService } from 'vs/platform/instantiation/common/instantiationService';
+import { Disposable } from 'vs/base/common/lifecycle';
 
-gracefulFs.gracefulify(fs); // enable gracefulFs
+export class CodeWindow extends Disposable {
 
-export function startup(configuration: IWindowConfiguration): Promise<void> {
+	constructor(private readonly configuration: IWindowConfiguration) {
+		super();
 
-	// Massage configuration file URIs
-	revive(configuration);
-
-	// Setup perf
-	perf.importEntries(configuration.perfEntries);
-
-	// Configure emitter leak warning threshold
-	setGlobalLeakWarningThreshold(-1);
-
-
-	// Browser config
-	browser.setZoomFactor(webFrame.getZoomFactor()); // Ensure others can listen to zoom level changes
-	browser.setZoomLevel(webFrame.getZoomLevel(), true /* isTrusted */); // Can be trusted because we are not setting it ourselves (https://github.com/Microsoft/vscode/issues/26151)
-	browser.setFullscreen(!!configuration.fullscreen);
-	browser.setAccessibilitySupport(configuration.accessibilitySupport ? platform.AccessibilitySupport.Enabled : platform.AccessibilitySupport.Disabled);
-
-	// Keyboard support
-	KeyboardMapperFactory.INSTANCE._onKeyboardLayoutChanged();
-
-	// Setup Intl for comparers
-	comparer.setFileNameComparer(new IdleValue(() => {
-		const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-		return {
-			collator: collator,
-			collatorIsNumeric: collator.resolvedOptions().numeric
-		};
-	}));
-
-	// Open workbench
-	return openWorkbench(configuration);
-}
-
-function revive(workbench: IWindowConfiguration) {
-	if (workbench.folderUri) {
-		workbench.folderUri = uri.revive(workbench.folderUri);
+		this.init();
 	}
 
-	const filesToWaitPaths = workbench.filesToWait && workbench.filesToWait.paths;
-	[filesToWaitPaths, workbench.filesToOpen, workbench.filesToCreate, workbench.filesToDiff].forEach(paths => {
-		if (Array.isArray(paths)) {
-			paths.forEach(path => {
-				if (path.fileUri) {
-					path.fileUri = uri.revive(path.fileUri);
-				}
-			});
+	private init(): void {
+
+		// Enable gracefulFs
+		gracefulFs.gracefulify(fs);
+
+		// Massage configuration file URIs
+		this.reviveUris();
+
+		// Setup perf
+		perf.importEntries(this.configuration.perfEntries);
+
+		// Configure emitter leak warning threshold
+		setGlobalLeakWarningThreshold(175);
+
+		// Browser config
+		browser.setZoomFactor(webFrame.getZoomFactor()); // Ensure others can listen to zoom level changes
+		browser.setZoomLevel(webFrame.getZoomLevel(), true /* isTrusted */); // Can be trusted because we are not setting it ourselves (https://github.com/Microsoft/vscode/issues/26151)
+		browser.setFullscreen(!!this.configuration.fullscreen);
+		browser.setAccessibilitySupport(this.configuration.accessibilitySupport ? platform.AccessibilitySupport.Enabled : platform.AccessibilitySupport.Disabled);
+
+		// Keyboard support
+		KeyboardMapperFactory.INSTANCE._onKeyboardLayoutChanged();
+
+		// Setup Intl for comparers
+		comparer.setFileNameComparer(new IdleValue(() => {
+			const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+			return {
+				collator: collator,
+				collatorIsNumeric: collator.resolvedOptions().numeric
+			};
+		}));
+	}
+
+	private reviveUris() {
+		if (this.configuration.folderUri) {
+			this.configuration.folderUri = uri.revive(this.configuration.folderUri);
 		}
-	});
-}
+		if (this.configuration.workspace) {
+			this.configuration.workspace = reviveWorkspaceIdentifier(this.configuration.workspace);
+		}
 
-function openWorkbench(configuration: IWindowConfiguration): Promise<void> {
-	const mainProcessClient = new ElectronIPCClient(`window:${configuration.windowId}`);
-	const mainServices = createMainProcessServices(mainProcessClient);
+		const filesToWaitPaths = this.configuration.filesToWait && this.configuration.filesToWait.paths;
+		[filesToWaitPaths, this.configuration.filesToOpen, this.configuration.filesToCreate, this.configuration.filesToDiff].forEach(paths => {
+			if (Array.isArray(paths)) {
+				paths.forEach(path => {
+					if (path.fileUri) {
+						path.fileUri = uri.revive(path.fileUri);
+					}
+				});
+			}
+		});
+	}
 
-	const environmentService = new EnvironmentService(configuration, configuration.execPath);
+	open(): Promise<void> {
+		const mainProcessClient = this._register(new ElectronIPCClient(`window:${this.configuration.windowId}`));
 
-	const logService = createLogService(mainProcessClient, configuration, environmentService);
-	logService.trace('openWorkbench configuration', JSON.stringify(configuration));
-
-	// Resolve a workspace payload that we can get the workspace ID from
-	return createWorkspaceInitializationPayload(configuration, environmentService).then(payload => {
-
-		return Promise.all([
-
-			// Create and initialize workspace/configuration service
-			createWorkspaceService(payload, environmentService, logService),
-
-			// Create and initialize storage service
-			createStorageService(payload, environmentService, logService, mainProcessClient)
-		]).then(services => {
-			const workspaceService = services[0];
-			const storageService = new DelegatingStorageService(services[1], createStorageLegacyService(workspaceService, environmentService), logService, workspaceService);
+		return this.initServices(mainProcessClient).then(services => {
 
 			return domContentLoaded().then(() => {
 				perf.mark('willStartWorkbench');
 
-				// Create Shell
-				const shell = new WorkbenchShell(document.body, {
-					contextService: workspaceService,
-					configurationService: workspaceService,
-					environmentService,
-					logService,
-					storageService
-				}, mainServices, mainProcessClient, configuration);
+				const instantiationService = new InstantiationService(services, true);
 
-				// Gracefully Shutdown Storage
-				shell.onWillShutdown(event => {
-					event.join(storageService.close());
-				});
+				// Create Workbench
+				const workbench: Workbench = instantiationService.createInstance(
+					Workbench,
+					document.body,
+					this.configuration,
+					services,
+					mainProcessClient
+				);
 
-				// Open Shell
-				shell.open();
+				// Workbench Lifecycle
+				this._register(workbench.onShutdown(() => this.dispose()));
+				this._register(workbench.onWillShutdown(event => event.join((services.get(IStorageService) as StorageService).close())));
+
+				// Startup
+				workbench.startup();
+
+				// Window
+				this._register(instantiationService.createInstance(ElectronWindow));
 
 				// Inform user about loading issues from the loader
 				(<any>self).require.config({
 					onError: err => {
 						if (err.errorCode === 'load') {
-							shell.onUnexpectedError(new Error(nls.localize('loaderErrorNative', "Failed to load a required file. Please restart the application to try again. Details: {0}", JSON.stringify(err))));
+							onUnexpectedError(new Error(nls.localize('loaderErrorNative', "Failed to load a required file. Please restart the application to try again. Details: {0}", JSON.stringify(err))));
 						}
 					}
 				});
 			});
 		});
-	});
-}
-
-function createWorkspaceInitializationPayload(configuration: IWindowConfiguration, environmentService: EnvironmentService): Promise<IWorkspaceInitializationPayload> {
-
-	// Multi-root workspace
-	if (configuration.workspace) {
-		return Promise.resolve(configuration.workspace as IMultiFolderWorkspaceInitializationPayload);
 	}
 
-	// Single-folder workspace
-	let workspaceInitializationPayload: Promise<IWorkspaceInitializationPayload> = Promise.resolve(void 0);
-	if (configuration.folderUri) {
-		workspaceInitializationPayload = resolveSingleFolderWorkspaceInitializationPayload(configuration.folderUri);
+	private initServices(mainProcessClient: ElectronIPCClient): Promise<ServiceCollection> {
+		const serviceCollection = new ServiceCollection();
+
+		// Windows Channel
+		const windowsChannel = mainProcessClient.getChannel('windows');
+		serviceCollection.set(IWindowsService, new WindowsChannelClient(windowsChannel));
+
+		// Update Channel
+		const updateChannel = mainProcessClient.getChannel('update');
+		serviceCollection.set(IUpdateService, new SyncDescriptor(UpdateChannelClient, [updateChannel]));
+
+		// URL Channel
+		const urlChannel = mainProcessClient.getChannel('url');
+		const mainUrlService = new URLServiceChannelClient(urlChannel);
+		const urlService = new RelayURLService(mainUrlService);
+		serviceCollection.set(IURLService, urlService);
+
+		// URLHandler Channel
+		const urlHandlerChannel = new URLHandlerChannel(urlService);
+		mainProcessClient.registerChannel('urlHandler', urlHandlerChannel);
+
+		// Issue Channel
+		const issueChannel = mainProcessClient.getChannel('issue');
+		serviceCollection.set(IIssueService, new SyncDescriptor(IssueChannelClient, [issueChannel]));
+
+		// Menubar Channel
+		const menubarChannel = mainProcessClient.getChannel('menubar');
+		serviceCollection.set(IMenubarService, new SyncDescriptor(MenubarChannelClient, [menubarChannel]));
+
+		// Workspaces Channel
+		const workspacesChannel = mainProcessClient.getChannel('workspaces');
+		serviceCollection.set(IWorkspacesService, new WorkspacesChannelClient(workspacesChannel));
+
+		// Environment
+		const environmentService = new EnvironmentService(this.configuration, this.configuration.execPath);
+		serviceCollection.set(IEnvironmentService, environmentService);
+
+		// Log
+		const logService = this._register(this.createLogService(mainProcessClient, environmentService));
+		serviceCollection.set(ILogService, logService);
+
+		// Resolve a workspace payload that we can get the workspace ID from
+		return this.resolveWorkspaceInitializationPayload(environmentService).then(payload => {
+
+			return Promise.all([
+
+				// Create and initialize workspace/configuration service
+				this.createWorkspaceService(payload, environmentService, logService),
+
+				// Create and initialize storage service
+				this.createStorageService(payload, environmentService, logService, mainProcessClient)
+			]).then(services => {
+				serviceCollection.set(IWorkspaceContextService, services[0]);
+				serviceCollection.set(IConfigurationService, services[0]);
+				serviceCollection.set(IStorageService, services[1]);
+
+				return serviceCollection;
+			});
+		});
 	}
 
-	return workspaceInitializationPayload.then(payload => {
+	private resolveWorkspaceInitializationPayload(environmentService: EnvironmentService): Promise<IWorkspaceInitializationPayload> {
 
-		// Fallback to empty workspace if we have no payload yet.
-		if (!payload) {
-			let id: string;
-			if (configuration.backupPath) {
-				id = basename(configuration.backupPath); // we know the backupPath must be a unique path so we leverage its name as workspace ID
-			} else if (environmentService.isExtensionDevelopment) {
-				id = 'ext-dev'; // extension development window never stores backups and is a singleton
-			} else {
-				return Promise.reject(new Error('Unexpected window configuration without backupPath'));
-			}
-
-			payload = { id } as IEmptyWorkspaceInitializationPayload;
+		// Multi-root workspace
+		if (this.configuration.workspace) {
+			return Promise.resolve(this.configuration.workspace as IMultiFolderWorkspaceInitializationPayload);
 		}
 
-		return payload;
-	});
-}
-
-function resolveSingleFolderWorkspaceInitializationPayload(folderUri: ISingleFolderWorkspaceIdentifier): Promise<ISingleFolderWorkspaceInitializationPayload> {
-
-	// Return early the folder is not local
-	if (folderUri.scheme !== Schemas.file) {
-		return Promise.resolve({ id: createHash('md5').update(folderUri.toString()).digest('hex'), folder: folderUri });
-	}
-
-	function computeLocalDiskFolderId(folder: uri, stat: fs.Stats): string {
-		let ctime: number;
-		if (platform.isLinux) {
-			ctime = stat.ino; // Linux: birthtime is ctime, so we cannot use it! We use the ino instead!
-		} else if (platform.isMacintosh) {
-			ctime = stat.birthtime.getTime(); // macOS: birthtime is fine to use as is
-		} else if (platform.isWindows) {
-			if (typeof stat.birthtimeMs === 'number') {
-				ctime = Math.floor(stat.birthtimeMs); // Windows: fix precision issue in node.js 8.x to get 7.x results (see https://github.com/nodejs/node/issues/19897)
-			} else {
-				ctime = stat.birthtime.getTime();
-			}
+		// Single-folder workspace
+		let workspaceInitializationPayload: Promise<IWorkspaceInitializationPayload | undefined> = Promise.resolve(undefined);
+		if (this.configuration.folderUri) {
+			workspaceInitializationPayload = this.resolveSingleFolderWorkspaceInitializationPayload(this.configuration.folderUri);
 		}
 
-		// we use the ctime as extra salt to the ID so that we catch the case of a folder getting
-		// deleted and recreated. in that case we do not want to carry over previous state
-		return createHash('md5').update(folder.fsPath).update(ctime ? String(ctime) : '').digest('hex');
+		return workspaceInitializationPayload.then(payload => {
+
+			// Fallback to empty workspace if we have no payload yet.
+			if (!payload) {
+				let id: string;
+				if (this.configuration.backupPath) {
+					id = basename(this.configuration.backupPath); // we know the backupPath must be a unique path so we leverage its name as workspace ID
+				} else if (environmentService.isExtensionDevelopment) {
+					id = 'ext-dev'; // extension development window never stores backups and is a singleton
+				} else {
+					return Promise.reject(new Error('Unexpected window configuration without backupPath'));
+				}
+
+				payload = { id } as IEmptyWorkspaceInitializationPayload;
+			}
+
+			return payload;
+		});
 	}
 
-	// For local: ensure path is absolute and exists
-	const sanitizedFolderPath = sanitizeFilePath(folderUri.fsPath, process.env['VSCODE_CWD'] || process.cwd());
-	return stat(sanitizedFolderPath).then(stat => {
-		const sanitizedFolderUri = uri.file(sanitizedFolderPath);
-		return {
-			id: computeLocalDiskFolderId(sanitizedFolderUri, stat),
-			folder: sanitizedFolderUri
-		} as ISingleFolderWorkspaceInitializationPayload;
-	}, error => onUnexpectedError(error));
-}
+	private resolveSingleFolderWorkspaceInitializationPayload(folderUri: ISingleFolderWorkspaceIdentifier): Promise<ISingleFolderWorkspaceInitializationPayload | undefined> {
 
-function createWorkspaceService(payload: IWorkspaceInitializationPayload, environmentService: IEnvironmentService, logService: ILogService): Promise<WorkspaceService> {
-	const workspaceService = new WorkspaceService(environmentService);
+		// Return early the folder is not local
+		if (folderUri.scheme !== Schemas.file) {
+			return Promise.resolve({ id: createHash('md5').update(folderUri.toString()).digest('hex'), folder: folderUri });
+		}
 
-	return workspaceService.initialize(payload).then(() => workspaceService, error => {
-		onUnexpectedError(error);
-		logService.error(error);
+		function computeLocalDiskFolderId(folder: uri, stat: fs.Stats): string {
+			let ctime: number | undefined;
+			if (platform.isLinux) {
+				ctime = stat.ino; // Linux: birthtime is ctime, so we cannot use it! We use the ino instead!
+			} else if (platform.isMacintosh) {
+				ctime = stat.birthtime.getTime(); // macOS: birthtime is fine to use as is
+			} else if (platform.isWindows) {
+				if (typeof stat.birthtimeMs === 'number') {
+					ctime = Math.floor(stat.birthtimeMs); // Windows: fix precision issue in node.js 8.x to get 7.x results (see https://github.com/nodejs/node/issues/19897)
+				} else {
+					ctime = stat.birthtime.getTime();
+				}
+			}
 
-		return workspaceService;
-	});
-}
+			// we use the ctime as extra salt to the ID so that we catch the case of a folder getting
+			// deleted and recreated. in that case we do not want to carry over previous state
+			return createHash('md5').update(folder.fsPath).update(ctime ? String(ctime) : '').digest('hex');
+		}
 
-function createStorageService(payload: IWorkspaceInitializationPayload, environmentService: IEnvironmentService, logService: ILogService, mainProcessClient: ElectronIPCClient): Thenable<StorageService> {
-	const globalStorageDatabase = new GlobalStorageDatabaseChannelClient(mainProcessClient.getChannel('storage'));
-	const storageService = new StorageService(globalStorageDatabase, logService, environmentService);
-
-	return storageService.initialize(payload).then(() => storageService, error => {
-		onUnexpectedError(error);
-		logService.error(error);
-
-		return storageService;
-	});
-}
-
-function createStorageLegacyService(workspaceService: IWorkspaceContextService, environmentService: IEnvironmentService): IStorageLegacyService {
-	let workspaceId: string;
-
-	switch (workspaceService.getWorkbenchState()) {
-
-		// in multi root workspace mode we use the provided ID as key for workspace storage
-		case WorkbenchState.WORKSPACE:
-			workspaceId = uri.from({ path: workspaceService.getWorkspace().id, scheme: 'root' }).toString();
-			break;
-
-		// in single folder mode we use the path of the opened folder as key for workspace storage
-		// the ctime is used as secondary workspace id to clean up stale UI state if necessary
-		case WorkbenchState.FOLDER:
-			const workspace: Workspace = <Workspace>workspaceService.getWorkspace();
-			workspaceId = workspace.folders[0].uri.toString();
-			break;
-
-		// finally, if we do not have a workspace open, we need to find another identifier for the window to store
-		// workspace UI state. if we have a backup path in the configuration we can use that because this
-		// will be a unique identifier per window that is stable between restarts as long as there are
-		// dirty files in the workspace.
-		// We use basename() to produce a short identifier, we do not need the full path. We use a custom
-		// scheme so that we can later distinguish these identifiers from the workspace one.
-		case WorkbenchState.EMPTY:
-			workspaceId = workspaceService.getWorkspace().id;
-			break;
+		// For local: ensure path is absolute and exists
+		const sanitizedFolderPath = sanitizeFilePath(folderUri.fsPath, process.env['VSCODE_CWD'] || process.cwd());
+		return stat(sanitizedFolderPath).then(stat => {
+			const sanitizedFolderUri = uri.file(sanitizedFolderPath);
+			return {
+				id: computeLocalDiskFolderId(sanitizedFolderUri, stat),
+				folder: sanitizedFolderUri
+			} as ISingleFolderWorkspaceInitializationPayload;
+		}, error => onUnexpectedError(error));
 	}
 
-	const disableStorage = !!environmentService.extensionTestsPath; // never keep any state when running extension tests!
+	private createWorkspaceService(payload: IWorkspaceInitializationPayload, environmentService: IEnvironmentService, logService: ILogService): Promise<WorkspaceService> {
+		const workspaceService = new WorkspaceService(environmentService);
 
-	let storage: IStorageLegacy;
-	if (disableStorage) {
-		storage = inMemoryLocalStorageInstance;
-	} else {
-		storage = window.localStorage;
+		return workspaceService.initialize(payload).then(() => workspaceService, error => {
+			onUnexpectedError(error);
+			logService.error(error);
+
+			return workspaceService;
+		});
 	}
 
-	return new StorageLegacyService(storage, storage, workspaceId);
+	private createStorageService(payload: IWorkspaceInitializationPayload, environmentService: IEnvironmentService, logService: ILogService, mainProcessClient: ElectronIPCClient): Promise<StorageService> {
+		const globalStorageDatabase = new GlobalStorageDatabaseChannelClient(mainProcessClient.getChannel('storage'));
+		const storageService = new StorageService(globalStorageDatabase, logService, environmentService);
+
+		return storageService.initialize(payload).then(() => storageService, error => {
+			onUnexpectedError(error);
+			logService.error(error);
+
+			return storageService;
+		});
+	}
+
+	private createLogService(mainProcessClient: ElectronIPCClient, environmentService: IEnvironmentService): ILogService {
+		const spdlogService = createSpdLogService(`renderer${this.configuration.windowId}`, this.configuration.logLevel, environmentService.logsPath);
+		const consoleLogService = new ConsoleLogService(this.configuration.logLevel);
+		const logService = new MultiplexLogService([consoleLogService, spdlogService]);
+		const logLevelClient = new LogLevelSetterChannelClient(mainProcessClient.getChannel('loglevel'));
+
+		return new FollowerLogService(logLevelClient, logService);
+	}
 }
 
-function createLogService(mainProcessClient: ElectronIPCClient, configuration: IWindowConfiguration, environmentService: IEnvironmentService): ILogService {
-	const spdlogService = createSpdLogService(`renderer${configuration.windowId}`, configuration.logLevel, environmentService.logsPath);
-	const consoleLogService = new ConsoleLogService(configuration.logLevel);
-	const logService = new MultiplexLogService([consoleLogService, spdlogService]);
-	const logLevelClient = new LogLevelSetterChannelClient(mainProcessClient.getChannel('loglevel'));
+export function main(configuration: IWindowConfiguration): Promise<void> {
+	const window = new CodeWindow(configuration);
 
-	return new FollowerLogService(logLevelClient, logService);
-}
-
-function createMainProcessServices(mainProcessClient: ElectronIPCClient): ServiceCollection {
-	const serviceCollection = new ServiceCollection();
-
-	const windowsChannel = mainProcessClient.getChannel('windows');
-	serviceCollection.set(IWindowsService, new WindowsChannelClient(windowsChannel));
-
-	const updateChannel = mainProcessClient.getChannel('update');
-	serviceCollection.set(IUpdateService, new SyncDescriptor(UpdateChannelClient, [updateChannel]));
-
-	const urlChannel = mainProcessClient.getChannel('url');
-	const mainUrlService = new URLServiceChannelClient(urlChannel);
-	const urlService = new RelayURLService(mainUrlService);
-	serviceCollection.set(IURLService, urlService);
-
-	const urlHandlerChannel = new URLHandlerChannel(urlService);
-	mainProcessClient.registerChannel('urlHandler', urlHandlerChannel);
-
-	const issueChannel = mainProcessClient.getChannel('issue');
-	serviceCollection.set(IIssueService, new SyncDescriptor(IssueChannelClient, [issueChannel]));
-
-	const menubarChannel = mainProcessClient.getChannel('menubar');
-	serviceCollection.set(IMenubarService, new SyncDescriptor(MenubarChannelClient, [menubarChannel]));
-
-	const workspacesChannel = mainProcessClient.getChannel('workspaces');
-	serviceCollection.set(IWorkspacesService, new WorkspacesChannelClient(workspacesChannel));
-
-	return serviceCollection;
+	return window.open();
 }

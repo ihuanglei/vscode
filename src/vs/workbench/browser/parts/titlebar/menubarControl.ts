@@ -4,16 +4,16 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as nls from 'vs/nls';
-import { IMenubarMenu, IMenubarMenuItemAction, IMenubarMenuItemSubmenu, IMenubarKeybinding, IMenubarService, IMenubarData } from 'vs/platform/menubar/common/menubar';
+import { IMenubarMenu, IMenubarMenuItemAction, IMenubarMenuItemSubmenu, IMenubarKeybinding, IMenubarService, IMenubarData, MenubarMenuItem } from 'vs/platform/menubar/common/menubar';
 import { IMenuService, MenuId, IMenu, SubmenuItemAction } from 'vs/platform/actions/common/actions';
 import { registerThemingParticipant, ITheme, ICssStyleCollector, IThemeService } from 'vs/platform/theme/common/themeService';
-import { IWindowService, MenuBarVisibility, IWindowsService, getTitleBarStyle } from 'vs/platform/windows/common/windows';
+import { IWindowService, MenuBarVisibility, IWindowsService, getTitleBarStyle, URIType } from 'vs/platform/windows/common/windows';
 import { IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
 import { IAction, Action } from 'vs/base/common/actions';
 import { Separator } from 'vs/base/browser/ui/actionbar/actionbar';
 import * as DOM from 'vs/base/browser/dom';
 import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
-import { isMacintosh, isLinux } from 'vs/base/common/platform';
+import { isMacintosh, isLinux, AccessibilitySupport } from 'vs/base/common/platform';
 import { IConfigurationService, IConfigurationChangeEvent } from 'vs/platform/configuration/common/configuration';
 import { Event, Emitter } from 'vs/base/common/event';
 import { Disposable } from 'vs/base/common/lifecycle';
@@ -31,6 +31,8 @@ import { IEnvironmentService } from 'vs/platform/environment/common/environment'
 import { MenuBar } from 'vs/base/browser/ui/menu/menubar';
 import { SubmenuAction } from 'vs/base/browser/ui/menu/menu';
 import { attachMenuStyler } from 'vs/platform/theme/common/styler';
+import { assign } from 'vs/base/common/objects';
+import { getAccessibilitySupport } from 'vs/base/browser/browser';
 
 export class MenubarControl extends Disposable {
 
@@ -74,26 +76,26 @@ export class MenubarControl extends Disposable {
 	private container: HTMLElement;
 	private recentlyOpened: IRecentlyOpened;
 
-	private _onVisibilityChange: Emitter<boolean>;
-	private _onFocusStateChange: Emitter<boolean>;
+	private readonly _onVisibilityChange: Emitter<boolean>;
+	private readonly _onFocusStateChange: Emitter<boolean>;
 
 	private static MAX_MENU_RECENT_ENTRIES = 10;
 
 	constructor(
-		@IThemeService private themeService: IThemeService,
-		@IMenubarService private menubarService: IMenubarService,
-		@IMenuService private menuService: IMenuService,
-		@IWindowService private windowService: IWindowService,
-		@IWindowsService private windowsService: IWindowsService,
-		@IContextKeyService private contextKeyService: IContextKeyService,
-		@IKeybindingService private keybindingService: IKeybindingService,
-		@IConfigurationService private configurationService: IConfigurationService,
-		@ILabelService private labelService: ILabelService,
-		@IUpdateService private updateService: IUpdateService,
-		@IStorageService private storageService: IStorageService,
-		@INotificationService private notificationService: INotificationService,
-		@IPreferencesService private preferencesService: IPreferencesService,
-		@IEnvironmentService private environmentService: IEnvironmentService
+		@IThemeService private readonly themeService: IThemeService,
+		@IMenubarService private readonly menubarService: IMenubarService,
+		@IMenuService private readonly menuService: IMenuService,
+		@IWindowService private readonly windowService: IWindowService,
+		@IWindowsService private readonly windowsService: IWindowsService,
+		@IContextKeyService private readonly contextKeyService: IContextKeyService,
+		@IKeybindingService private readonly keybindingService: IKeybindingService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
+		@ILabelService private readonly labelService: ILabelService,
+		@IUpdateService private readonly updateService: IUpdateService,
+		@IStorageService private readonly storageService: IStorageService,
+		@INotificationService private readonly notificationService: INotificationService,
+		@IPreferencesService private readonly preferencesService: IPreferencesService,
+		@IEnvironmentService private readonly environmentService: IEnvironmentService
 	) {
 
 		super();
@@ -130,7 +132,9 @@ export class MenubarControl extends Disposable {
 			this.recentlyOpened = recentlyOpened;
 		});
 
-		this.detectAndRecommendCustomTitlebar();
+		this.notifyExistingLinuxUser();
+
+		this.notifyUserOfCustomMenubarAccessibility();
 
 		this.registerListeners();
 	}
@@ -190,8 +194,8 @@ export class MenubarControl extends Disposable {
 			this.updateMenubar();
 		}
 
-		if (event.affectsConfiguration('window.menuBarVisibility')) {
-			this.detectAndRecommendCustomTitlebar();
+		if (event.affectsConfiguration('editor.accessibilitySupport')) {
+			this.notifyUserOfCustomMenubarAccessibility();
 		}
 	}
 
@@ -202,39 +206,70 @@ export class MenubarControl extends Disposable {
 		});
 	}
 
-	private detectAndRecommendCustomTitlebar(): void {
+	// TODO@sbatten remove after feb19
+	private notifyExistingLinuxUser(): void {
 		if (!isLinux) {
 			return;
 		}
 
-		if (!this.storageService.getBoolean('menubar/electronFixRecommended', StorageScope.GLOBAL, false)) {
-			if (this.currentMenubarVisibility === 'hidden' || this.currentTitlebarStyleSetting === 'custom') {
-				// Issue will not arise for user, abort notification
-				return;
-			}
-
-			const message = nls.localize('menubar.electronFixRecommendation', "If you experience hard to read text in the menu bar, we recommend trying out the custom title bar.");
-			this.notificationService.prompt(Severity.Info, message, [
-				{
-					label: nls.localize('goToSetting', "Open Settings"),
-					run: () => {
-						return this.preferencesService.openGlobalSettings(undefined, { query: 'window.titleBarStyle' });
-					}
-				},
-				{
-					label: nls.localize('moreInfo', "More Info"),
-					run: () => {
-						window.open('https://go.microsoft.com/fwlink/?linkid=2038566');
-					}
-				},
-				{
-					label: nls.localize('neverShowAgain', "Don't Show Again"),
-					run: () => {
-						this.storageService.store('menubar/electronFixRecommended', true, StorageScope.GLOBAL);
-					}
-				}
-			]);
+		const isNewUser = !this.storageService.get('telemetry.lastSessionDate', StorageScope.GLOBAL);
+		const hasBeenNotified = this.storageService.getBoolean('menubar/linuxTitlebarRevertNotified', StorageScope.GLOBAL, false);
+		const titleBarConfiguration = this.configurationService.inspect('window.titleBarStyle');
+		const customShown = getTitleBarStyle(this.configurationService, this.environmentService) === 'custom';
+		if (isNewUser || hasBeenNotified || (titleBarConfiguration && titleBarConfiguration.user) || customShown) {
+			return;
 		}
+
+		const message = nls.localize('menubar.linuxTitlebarRevertNotification', "We have updated the default title bar on Linux to use the native setting. If you prefer, you can go back to the custom setting. More information is available in our [online documentation](https://go.microsoft.com/fwlink/?linkid=2074137).");
+		this.notificationService.prompt(Severity.Info, message, [
+			{
+				label: nls.localize('goToSetting', "Open Settings"),
+				run: () => {
+					return this.preferencesService.openGlobalSettings(undefined, { query: 'window.titleBarStyle' });
+				}
+			},
+			{
+				label: nls.localize('neverShowAgain', "Don't Show Again"),
+				run: () => {
+					this.storageService.store('menubar/linuxTitlebarRevertNotified', true, StorageScope.GLOBAL);
+				}
+			}
+		]);
+
+		this.storageService.store('menubar/linuxTitlebarRevertNotified', true, StorageScope.GLOBAL);
+	}
+
+	private notifyUserOfCustomMenubarAccessibility(): void {
+		if (isMacintosh) {
+			return;
+		}
+
+		const hasBeenNotified = this.storageService.getBoolean('menubar/accessibleMenubarNotified', StorageScope.GLOBAL, false);
+		const usingCustomMenubar = getTitleBarStyle(this.configurationService, this.environmentService) === 'custom';
+		const detected = getAccessibilitySupport() === AccessibilitySupport.Enabled;
+		const config = this.configurationService.getValue('editor.accessibilitySupport');
+
+		if (hasBeenNotified || usingCustomMenubar || !(config === 'on' || (config === 'auto' && detected))) {
+			return;
+		}
+
+		const message = nls.localize('menubar.customTitlebarAccessibilityNotification', "Accessibility support is enabled for you. For the most accessible experience, we recommend the custom title bar style.");
+		this.notificationService.prompt(Severity.Info, message, [
+			{
+				label: nls.localize('goToSetting', "Open Settings"),
+				run: () => {
+					return this.preferencesService.openGlobalSettings(undefined, { query: 'window.titleBarStyle' });
+				}
+			},
+			{
+				label: nls.localize('neverShowAgain', "Don't Show Again"),
+				run: () => {
+					this.storageService.store('menubar/accessibleMenubarNotified', true, StorageScope.GLOBAL);
+				}
+			}
+		]);
+
+		this.storageService.store('menubar/accessibleMenubarNotified', true, StorageScope.GLOBAL);
 	}
 
 	private registerListeners(): void {
@@ -261,6 +296,9 @@ export class MenubarControl extends Disposable {
 				this.menubar.blur();
 			}));
 		}
+
+		// Update recent menu items on formatter registration
+		this._register(this.labelService.onDidChangeFormatters(() => { this.onRecentlyOpenedChange(); }));
 	}
 
 	private doUpdateMenubar(firstTime: boolean): void {
@@ -313,32 +351,43 @@ export class MenubarControl extends Disposable {
 		return label;
 	}
 
-	private createOpenRecentMenuAction(workspace: IWorkspaceIdentifier | ISingleFolderWorkspaceIdentifier | URI, commandId: string, isFile: boolean): IAction {
+	private createOpenRecentMenuAction(workspace: IWorkspaceIdentifier | ISingleFolderWorkspaceIdentifier | URI, isFile: boolean): IAction & { uri: URI } {
 
 		let label: string;
 		let uri: URI;
+		let commandId: string;
+		let typeHint: URIType | undefined;
 
 		if (isSingleFolderWorkspaceIdentifier(workspace) && !isFile) {
 			label = this.labelService.getWorkspaceLabel(workspace, { verbose: true });
 			uri = workspace;
+			commandId = 'openRecentFolder';
+			typeHint = 'folder';
 		} else if (isWorkspaceIdentifier(workspace)) {
 			label = this.labelService.getWorkspaceLabel(workspace, { verbose: true });
-			uri = URI.file(workspace.configPath);
+			uri = workspace.configPath;
+			commandId = 'openRecentWorkspace';
+			typeHint = 'file';
 		} else {
 			uri = workspace;
 			label = this.labelService.getUriLabel(uri);
+			commandId = 'openRecentFile';
+			typeHint = 'file';
 		}
 
-		return new Action(commandId, label, undefined, undefined, (event) => {
+		const ret: IAction = new Action(commandId, label, undefined, undefined, (event) => {
 			const openInNewWindow = event && ((!isMacintosh && (event.ctrlKey || event.shiftKey)) || (isMacintosh && (event.metaKey || event.altKey)));
 
-			return this.windowService.openWindow([uri], {
+			return this.windowService.openWindow([{ uri, typeHint }], {
 				forceNewWindow: openInNewWindow,
 				forceOpenWorkspaceAsFile: isFile
 			});
 		});
+
+		return assign(ret, { uri: uri });
 	}
 
+	/* Custom Menu takes actions */
 	private getOpenRecentActions(): IAction[] {
 		if (!this.recentlyOpened) {
 			return [];
@@ -350,7 +399,7 @@ export class MenubarControl extends Disposable {
 
 		if (workspaces.length > 0) {
 			for (let i = 0; i < MenubarControl.MAX_MENU_RECENT_ENTRIES && i < workspaces.length; i++) {
-				result.push(this.createOpenRecentMenuAction(workspaces[i], 'openRecentWorkspace', false));
+				result.push(this.createOpenRecentMenuAction(workspaces[i], false));
 			}
 
 			result.push(new Separator());
@@ -358,13 +407,26 @@ export class MenubarControl extends Disposable {
 
 		if (files.length > 0) {
 			for (let i = 0; i < MenubarControl.MAX_MENU_RECENT_ENTRIES && i < files.length; i++) {
-				result.push(this.createOpenRecentMenuAction(files[i], 'openRecentFile', false));
+				result.push(this.createOpenRecentMenuAction(files[i], true));
 			}
 
 			result.push(new Separator());
 		}
 
 		return result;
+	}
+
+	private transformOpenRecentAction(action: Separator | (IAction & { uri: URI })): MenubarMenuItem {
+		if (action instanceof Separator) {
+			return { id: 'vscode.menubar.separator' };
+		}
+
+		return {
+			id: action.id,
+			uri: action.uri,
+			enabled: action.enabled,
+			label: action.label
+		};
 	}
 
 	private getUpdateAction(): IAction | null {
@@ -499,13 +561,13 @@ export class MenubarControl extends Disposable {
 		// first try to resolve a native accelerator
 		const electronAccelerator = binding.getElectronAccelerator();
 		if (electronAccelerator) {
-			return { label: electronAccelerator };
+			return { label: electronAccelerator, userSettingsLabel: binding.getUserSettingsLabel() };
 		}
 
 		// we need this fallback to support keybindings that cannot show in electron menus (e.g. chords)
 		const acceleratorLabel = binding.getLabel();
 		if (acceleratorLabel) {
-			return { label: acceleratorLabel, isNative: false };
+			return { label: acceleratorLabel, isNative: false, userSettingsLabel: binding.getUserSettingsLabel() };
 		}
 
 		return null;
@@ -532,6 +594,11 @@ export class MenubarControl extends Disposable {
 					menuToPopulate.items.push(menubarSubmenuItem);
 					menuToDispose.dispose();
 				} else {
+					if (menuItem.id === 'workbench.action.openRecent') {
+						const actions = this.getOpenRecentActions().map(this.transformOpenRecentAction);
+						menuToPopulate.items.push(...actions);
+					}
+
 					let menubarMenuItem: IMenubarMenuItemAction = {
 						id: menuItem.id,
 						label: menuItem.label

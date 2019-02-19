@@ -8,7 +8,7 @@ import { StorageScope } from 'vs/platform/storage/common/storage';
 import { TestStorageService } from 'vs/workbench/test/workbenchTestServices';
 import { StorageService } from 'vs/platform/storage/node/storageService';
 import { generateUuid } from 'vs/base/common/uuid';
-import { join } from 'path';
+import { join } from 'vs/base/common/path';
 import { tmpdir } from 'os';
 import { mkdirp, del } from 'vs/base/node/pfs';
 import { NullLogService } from 'vs/platform/log/common/log';
@@ -30,10 +30,10 @@ suite('StorageService', () => {
 		const storage = new TestStorageService();
 
 		storage.store('Monaco.IDE.Core.Storage.Test.remove', 'foobar', scope);
-		strictEqual('foobar', storage.get('Monaco.IDE.Core.Storage.Test.remove', scope, void 0));
+		strictEqual('foobar', storage.get('Monaco.IDE.Core.Storage.Test.remove', scope, (undefined)!));
 
 		storage.remove('Monaco.IDE.Core.Storage.Test.remove', scope);
-		ok(!storage.get('Monaco.IDE.Core.Storage.Test.remove', scope, void 0));
+		ok(!storage.get('Monaco.IDE.Core.Storage.Test.remove', scope, (undefined)!));
 	}
 
 	test('Get Data, Integer, Boolean (global, in-memory)', () => {
@@ -55,22 +55,22 @@ suite('StorageService', () => {
 		strictEqual(storage.getBoolean('Monaco.IDE.Core.Storage.Test.getBoolean', scope, false), false);
 
 		storage.store('Monaco.IDE.Core.Storage.Test.get', 'foobar', scope);
-		strictEqual(storage.get('Monaco.IDE.Core.Storage.Test.get', scope, void 0), 'foobar');
+		strictEqual(storage.get('Monaco.IDE.Core.Storage.Test.get', scope, (undefined)!), 'foobar');
 
 		storage.store('Monaco.IDE.Core.Storage.Test.get', '', scope);
-		strictEqual(storage.get('Monaco.IDE.Core.Storage.Test.get', scope, void 0), '');
+		strictEqual(storage.get('Monaco.IDE.Core.Storage.Test.get', scope, (undefined)!), '');
 
 		storage.store('Monaco.IDE.Core.Storage.Test.getInteger', 5, scope);
-		strictEqual(storage.getInteger('Monaco.IDE.Core.Storage.Test.getInteger', scope, void 0), 5);
+		strictEqual(storage.getInteger('Monaco.IDE.Core.Storage.Test.getInteger', scope, (undefined)!), 5);
 
 		storage.store('Monaco.IDE.Core.Storage.Test.getInteger', 0, scope);
-		strictEqual(storage.getInteger('Monaco.IDE.Core.Storage.Test.getInteger', scope, void 0), 0);
+		strictEqual(storage.getInteger('Monaco.IDE.Core.Storage.Test.getInteger', scope, (undefined)!), 0);
 
 		storage.store('Monaco.IDE.Core.Storage.Test.getBoolean', true, scope);
-		strictEqual(storage.getBoolean('Monaco.IDE.Core.Storage.Test.getBoolean', scope, void 0), true);
+		strictEqual(storage.getBoolean('Monaco.IDE.Core.Storage.Test.getBoolean', scope, (undefined)!), true);
 
 		storage.store('Monaco.IDE.Core.Storage.Test.getBoolean', false, scope);
-		strictEqual(storage.getBoolean('Monaco.IDE.Core.Storage.Test.getBoolean', scope, void 0), false);
+		strictEqual(storage.getBoolean('Monaco.IDE.Core.Storage.Test.getBoolean', scope, (undefined)!), false);
 
 		strictEqual(storage.get('Monaco.IDE.Core.Storage.Test.getDefault', scope, 'getDefault'), 'getDefault');
 		strictEqual(storage.getInteger('Monaco.IDE.Core.Storage.Test.getIntegerDefault', scope, 5), 5);

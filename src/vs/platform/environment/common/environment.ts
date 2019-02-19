@@ -25,10 +25,10 @@ export interface ParsedArgs {
 	'reuse-window'?: boolean;
 	locale?: string;
 	'user-data-dir'?: string;
-	performance?: boolean;
 	'prof-startup'?: string;
 	'prof-startup-prefix'?: string;
 	'prof-append-timers'?: string;
+	'prof-modules'?: string;
 	verbose?: boolean;
 	trace?: boolean;
 	'trace-category-filter'?: string;
@@ -39,11 +39,11 @@ export interface ParsedArgs {
 	'builtin-extensions-dir'?: string;
 	extensionDevelopmentPath?: string;
 	extensionTestsPath?: string;
-	debugPluginHost?: string;
-	debugBrkPluginHost?: string;
+	'inspect-extensions'?: string;
+	'inspect-brk-extensions'?: string;
 	debugId?: string;
-	debugSearch?: string;
-	debugBrkSearch?: string;
+	'inspect-search'?: string;
+	'inspect-brk-search'?: string;
 	'disable-extensions'?: boolean;
 	'disable-extension'?: string | string[];
 	'list-extensions'?: boolean;
@@ -62,7 +62,7 @@ export interface ParsedArgs {
 	'disable-updates'?: string;
 	'disable-crash-reporter'?: string;
 	'skip-add-to-recently-opened'?: boolean;
-	'max-memory'?: number;
+	'max-memory'?: string;
 	'file-write'?: boolean;
 	'file-chmod'?: boolean;
 	'upload-logs'?: string;
@@ -109,7 +109,7 @@ export interface IEnvironmentService {
 	backupHome: string;
 	backupWorkspacesPath: string;
 
-	workspacesHome: string;
+	untitledWorkspacesHome: URI;
 
 	isExtensionDevelopment: boolean;
 	disableExtensions: boolean | string[];
@@ -126,7 +126,6 @@ export interface IEnvironmentService {
 	isBuilt: boolean;
 	wait: boolean;
 	status: boolean;
-	performance: boolean;
 
 	// logging
 	log?: string;

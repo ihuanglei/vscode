@@ -28,20 +28,18 @@ bootstrap.enableASARSupport();
 const args = parseCLIArgs();
 const userDataPath = getUserDataPath(args);
 
-// TODO@Ben global storage migration needs to happen very early before app.on("ready")
-// We copy the DB instead of moving it to ensure we are not running into locking issues
-if (process.env['VSCODE_TEST_STORAGE_MIGRATION']) {
-	try {
-		const globalStorageHome = path.join(userDataPath, 'User', 'globalStorage', 'temp.vscdb');
-		const localStorageHome = path.join(userDataPath, 'Local Storage');
-		const localStorageDB = path.join(localStorageHome, 'file__0.localstorage');
-		const localStorageDBBackup = path.join(localStorageHome, 'file__0.localstorage.vscmig');
-		if (!fs.existsSync(globalStorageHome) && fs.existsSync(localStorageDB)) {
-			fs.copyFileSync(localStorageDB, localStorageDBBackup);
-		}
-	} catch (error) {
-		console.error(error);
+// global storage migration needs to happen very early before app.on("ready")
+// TODO@Ben remove after a while
+try {
+	const globalStorageHome = path.join(userDataPath, 'User', 'globalStorage', 'state.vscdb');
+	const localStorageHome = path.join(userDataPath, 'Local Storage');
+	const localStorageDB = path.join(localStorageHome, 'file__0.localstorage');
+	const localStorageDBBackup = path.join(localStorageHome, 'file__0.vscmig');
+	if (!fs.existsSync(globalStorageHome) && fs.existsSync(localStorageDB)) {
+		fs.renameSync(localStorageDB, localStorageDBBackup);
 	}
+} catch (error) {
+	console.error(error);
 }
 
 app.setPath('userData', userDataPath);
@@ -59,7 +57,7 @@ registerListeners();
  */
 let nlsConfiguration = undefined;
 const userDefinedLocale = getUserDefinedLocale();
-userDefinedLocale.then((locale) => {
+userDefinedLocale.then(locale => {
 	if (locale && !nlsConfiguration) {
 		nlsConfiguration = getNLSConfiguration(locale);
 	}
@@ -100,7 +98,7 @@ function onReady() {
 
 		// First, we need to test a user defined locale. If it fails we try the app locale.
 		// If that fails we fall back to English.
-		nlsConfiguration.then((nlsConfig) => {
+		nlsConfiguration.then(nlsConfig => {
 
 			const startup = nlsConfig => {
 				nlsConfig._languagePackSupport = true;
@@ -108,7 +106,10 @@ function onReady() {
 				process.env['VSCODE_NODE_CACHED_DATA_DIR'] = cachedDataDir || '';
 
 				// Load main in AMD
-				require('./bootstrap-amd').load('vs/code/electron-main/main');
+				perf.mark('willLoadMainBundle');
+				require('./bootstrap-amd').load('vs/code/electron-main/main', () => {
+					perf.mark('didLoadMainBundle');
+				});
 			};
 
 			// We recevied a valid nlsConfig from a user defined locale
@@ -128,7 +129,7 @@ function onReady() {
 					// See above the comment about the loader and case sensitiviness
 					appLocale = appLocale.toLowerCase();
 
-					getNLSConfiguration(appLocale).then((nlsConfig) => {
+					getNLSConfiguration(appLocale).then(nlsConfig => {
 						if (!nlsConfig) {
 							nlsConfig = { locale: appLocale, availableLanguages: {} };
 						}
@@ -149,11 +150,8 @@ function onReady() {
  */
 function configureCommandlineSwitches(cliArgs, nodeCachedDataDir) {
 
-	// TODO@Ben Electron 2.0.x: prevent localStorage migration from SQLite to LevelDB due to issues
-	app.commandLine.appendSwitch('disable-mojo-local-storage');
-
 	// Force pre-Chrome-60 color profile handling (for https://github.com/Microsoft/vscode/issues/51791)
-	app.commandLine.appendSwitch('disable-features', 'ColorCorrectRendering');
+	app.commandLine.appendSwitch('disable-color-correct-rendering');
 
 	// Support JS Flags
 	const jsFlags = resolveJSFlags(cliArgs, nodeCachedDataDir.jsFlags());
@@ -168,10 +166,13 @@ function configureCommandlineSwitches(cliArgs, nodeCachedDataDir) {
  * @returns {string}
  */
 function resolveJSFlags(cliArgs, ...jsFlags) {
+
+	// Add any existing JS flags we already got from the command line
 	if (cliArgs['js-flags']) {
 		jsFlags.push(cliArgs['js-flags']);
 	}
 
+	// Support max-memory flag
 	if (cliArgs['max-memory'] && !/max_old_space_size=(\d+)/g.exec(cliArgs['js-flags'])) {
 		jsFlags.push(`--max_old_space_size=${cliArgs['max-memory']}`);
 	}
@@ -269,7 +270,8 @@ function getNodeCachedDir() {
 		}
 
 		jsFlags() {
-			return this.value ? '--nolazy' : undefined;
+			// return this.value ? '--nolazy' : undefined;
+			return undefined;
 		}
 
 		ensureExists() {
@@ -303,7 +305,7 @@ function getNodeCachedDir() {
  * @returns {string}
  */
 function stripComments(content) {
-	const regexp = /("(?:[^\\\"]*(?:\\.)?)*")|('(?:[^\\\']*(?:\\.)?)*')|(\/\*(?:\r?\n|.)*?\*\/)|(\/{2,}.*?(?:(?:\r?\n)|$))/g;
+	const regexp = /("(?:[^\\"]*(?:\\.)?)*")|('(?:[^\\']*(?:\\.)?)*')|(\/\*(?:\r?\n|.)*?\*\/)|(\/{2,}.*?(?:(?:\r?\n)|$))/g;
 
 	return content.replace(regexp, function (match, m1, m2, m3, m4) {
 		// Only one of m1, m2, m3, m4 matches
@@ -415,7 +417,7 @@ function rimraf(location) {
 		}
 	}, err => {
 		if (err.code === 'ENOENT') {
-			return void 0;
+			return undefined;
 		}
 		throw err;
 	});
@@ -435,20 +437,16 @@ function getUserDefinedLocale() {
 	}
 
 	const localeConfig = path.join(userDataPath, 'User', 'locale.json');
-	return exists(localeConfig).then((result) => {
-		if (result) {
-			return bootstrap.readFile(localeConfig).then((content) => {
-				content = stripComments(content);
-				try {
-					const value = JSON.parse(content).locale;
-					return value && typeof value === 'string' ? value.toLowerCase() : undefined;
-				} catch (e) {
-					return undefined;
-				}
-			});
-		} else {
+	return bootstrap.readFile(localeConfig).then(content => {
+		content = stripComments(content);
+		try {
+			const value = JSON.parse(content).locale;
+			return value && typeof value === 'string' ? value.toLowerCase() : undefined;
+		} catch (e) {
 			return undefined;
 		}
+	}, () => {
+		return undefined;
 	});
 }
 
@@ -537,7 +535,7 @@ function getNLSConfiguration(locale) {
 		if (!packConfig || typeof packConfig.hash !== 'string' || !packConfig.translations || typeof (mainPack = packConfig.translations['vscode']) !== 'string') {
 			return defaultResult(initialLocale);
 		}
-		return exists(mainPack).then((fileExists) => {
+		return exists(mainPack).then(fileExists => {
 			if (!fileExists) {
 				return defaultResult(initialLocale);
 			}
@@ -555,7 +553,7 @@ function getNLSConfiguration(locale) {
 				_resolvedLanguagePackCoreLocation: coreLocation,
 				_corruptedFile: corruptedFile
 			};
-			return exists(corruptedFile).then((corrupted) => {
+			return exists(corruptedFile).then(corrupted => {
 				// The nls cache directory is corrupted.
 				let toDelete;
 				if (corrupted) {
@@ -564,7 +562,7 @@ function getNLSConfiguration(locale) {
 					toDelete = Promise.resolve(undefined);
 				}
 				return toDelete.then(() => {
-					return exists(coreLocation).then((fileExists) => {
+					return exists(coreLocation).then(fileExists => {
 						if (fileExists) {
 							// We don't wait for this. No big harm if we can't touch
 							touch(coreLocation).catch(() => { });
@@ -573,7 +571,7 @@ function getNLSConfiguration(locale) {
 						}
 						return mkdirp(coreLocation).then(() => {
 							return Promise.all([bootstrap.readFile(path.join(__dirname, 'nls.metadata.json')), bootstrap.readFile(mainPack)]);
-						}).then((values) => {
+						}).then(values => {
 							const metadata = JSON.parse(values[0]);
 							const packData = JSON.parse(values[1]).contents;
 							const bundles = Object.keys(metadata.bundles);
@@ -609,7 +607,7 @@ function getNLSConfiguration(locale) {
 						}).then(() => {
 							perf.mark('nlsGeneration:end');
 							return result;
-						}).catch((err) => {
+						}).catch(err => {
 							console.error('Generating translation files failed.', err);
 							return defaultResult(locale);
 						});

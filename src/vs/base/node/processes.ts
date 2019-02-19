@@ -3,21 +3,21 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as path from 'path';
+import * as path from 'vs/base/common/path';
 import * as fs from 'fs';
 import * as cp from 'child_process';
 import * as nls from 'vs/nls';
 import * as Types from 'vs/base/common/types';
 import { IStringDictionary } from 'vs/base/common/collections';
 import * as Objects from 'vs/base/common/objects';
-import * as TPath from 'vs/base/common/paths';
+import * as extpath from 'vs/base/common/extpath';
 import * as Platform from 'vs/base/common/platform';
 import { LineDecoder } from 'vs/base/node/decoder';
 import { CommandOptions, ForkOptions, SuccessData, Source, TerminateResponse, TerminateResponseCode, Executable } from 'vs/base/common/processes';
 import { getPathFromAmdModule } from 'vs/base/common/amd';
 export { CommandOptions, ForkOptions, SuccessData, Source, TerminateResponse, TerminateResponseCode };
 
-export type ValueCallback<T> = (value?: T | Thenable<T>) => void;
+export type ValueCallback<T> = (value?: T | Promise<T>) => void;
 export type ErrorCallback = (error?: any) => void;
 export type ProgressCallback<T> = (progress: T) => void;
 
@@ -72,6 +72,26 @@ export function getWindowsShell(): string {
 	return process.env['comspec'] || 'cmd.exe';
 }
 
+/**
+ * Sanitizes a VS Code process environment by removing all Electron/VS Code-related values.
+ */
+export function sanitizeProcessEnvironment(env: Platform.IProcessEnvironment): void {
+	const keysToRemove = [
+		/^ELECTRON_.+$/,
+		/^GOOGLE_API_KEY$/,
+		/^VSCODE_.+$/
+	];
+	const envKeys = Object.keys(env);
+	envKeys.forEach(envKey => {
+		for (let i = 0; i < keysToRemove.length; i++) {
+			if (envKey.search(keysToRemove[i]) !== -1) {
+				delete env[envKey];
+				break;
+			}
+		}
+	});
+}
+
 export abstract class AbstractProcess<TProgressData> {
 	private cmd: string;
 	private args: string[];
@@ -107,7 +127,7 @@ export abstract class AbstractProcess<TProgressData> {
 	public constructor(executable: Executable);
 	public constructor(cmd: string, args: string[] | undefined, shell: boolean, options: CommandOptions | undefined);
 	public constructor(arg1: string | Executable, arg2?: string[], arg3?: boolean, arg4?: CommandOptions) {
-		if (arg2 !== void 0 && arg3 !== void 0 && arg4 !== void 0) {
+		if (arg2 !== undefined && arg3 !== undefined && arg4 !== undefined) {
 			this.cmd = <string>arg1;
 			this.args = arg2;
 			this.shell = arg3;
@@ -148,7 +168,7 @@ export abstract class AbstractProcess<TProgressData> {
 	}
 
 	public start(pp: ProgressCallback<TProgressData>): Promise<SuccessData> {
-		if (Platform.isWindows && ((this.options && this.options.cwd && TPath.isUNC(this.options.cwd)) || !this.options && TPath.isUNC(process.cwd()))) {
+		if (Platform.isWindows && ((this.options && this.options.cwd && extpath.isUNC(this.options.cwd)) || !this.options && extpath.isUNC(process.cwd()))) {
 			return Promise.reject(new Error(nls.localize('TaskRunner.UNC', 'Can\'t execute a shell command on a UNC drive.')));
 		}
 		return this.useExec().then((useExec) => {
@@ -409,7 +429,7 @@ export namespace win32 {
 		if (path.isAbsolute(command)) {
 			return command;
 		}
-		if (cwd === void 0) {
+		if (cwd === undefined) {
 			cwd = process.cwd();
 		}
 		let dir = path.dirname(command);
@@ -418,11 +438,11 @@ export namespace win32 {
 			// to the current working directory.
 			return path.join(cwd, command);
 		}
-		if (paths === void 0 && Types.isString(process.env.PATH)) {
+		if (paths === undefined && Types.isString(process.env.PATH)) {
 			paths = process.env.PATH.split(path.delimiter);
 		}
 		// No PATH environment. Make path absolute to the cwd.
-		if (paths === void 0 || paths.length === 0) {
+		if (paths === undefined || paths.length === 0) {
 			return path.join(cwd, command);
 		}
 		// We have a simple file name. We get the path variable from the env

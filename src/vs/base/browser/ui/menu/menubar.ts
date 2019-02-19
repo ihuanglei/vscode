@@ -59,9 +59,9 @@ export class MenuBar extends Disposable {
 		index: number;
 		holder?: HTMLElement;
 		widget?: Menu;
-	};
+	} | undefined;
 
-	private focusToReturn: HTMLElement;
+	private focusToReturn: HTMLElement | undefined;
 	private menuUpdater: RunOnceScheduler;
 
 	// Input-related
@@ -75,11 +75,12 @@ export class MenuBar extends Disposable {
 	private _focusState: MenubarState;
 	private actionRunner: IActionRunner;
 
-	private _onVisibilityChange: Emitter<boolean>;
-	private _onFocusStateChange: Emitter<boolean>;
+	private readonly _onVisibilityChange: Emitter<boolean>;
+	private readonly _onFocusStateChange: Emitter<boolean>;
 
 	private numMenusShown: number;
 	private menuStyle: IMenuStyles;
+	private overflowLayoutScheduled: IDisposable | null;
 
 	constructor(private container: HTMLElement, private options: IMenuBarOptions = {}) {
 		super();
@@ -117,7 +118,7 @@ export class MenuBar extends Disposable {
 			} else if (event.equals(KeyCode.Escape) && this.isFocused && !this.isOpen) {
 				this.setUnfocusedState();
 			} else if (!this.isOpen && !event.ctrlKey && this.options.enableMnemonics && this.mnemonicsInUse && this.mnemonics.has(key)) {
-				const menuIndex = this.mnemonics.get(key);
+				const menuIndex = this.mnemonics.get(key)!;
 				this.onMenuTriggered(menuIndex, false);
 			} else {
 				eventHandled = false;
@@ -149,11 +150,9 @@ export class MenuBar extends Disposable {
 		this._register(DOM.addDisposableListener(this.container, DOM.EventType.FOCUS_OUT, (e) => {
 			let event = e as FocusEvent;
 
-			if (event.relatedTarget) {
-				if (!this.container.contains(event.relatedTarget as HTMLElement)) {
-					this.focusToReturn = null;
-					this.setUnfocusedState();
-				}
+			if (!event.relatedTarget || !this.container.contains(event.relatedTarget as HTMLElement)) {
+				this.focusToReturn = undefined;
+				this.setUnfocusedState();
 			}
 		}));
 
@@ -170,7 +169,7 @@ export class MenuBar extends Disposable {
 			this.mnemonicsInUse = true;
 			this.updateMnemonicVisibility(true);
 
-			const menuIndex = this.mnemonics.get(key);
+			const menuIndex = this.mnemonics.get(key)!;
 			this.onMenuTriggered(menuIndex, false);
 		}));
 
@@ -222,7 +221,7 @@ export class MenuBar extends Disposable {
 			Gesture.addTarget(buttonElement);
 			this._register(DOM.addDisposableListener(buttonElement, EventType.Tap, (e: GestureEvent) => {
 				// Ignore this touch if the menu is touched
-				if (this.isOpen && this.focusedMenu.holder && DOM.isAncestor(e.initialTarget as HTMLElement, this.focusedMenu.holder)) {
+				if (this.isOpen && this.focusedMenu && this.focusedMenu.holder && DOM.isAncestor(e.initialTarget as HTMLElement, this.focusedMenu.holder)) {
 					return;
 				}
 
@@ -306,7 +305,7 @@ export class MenuBar extends Disposable {
 		Gesture.addTarget(buttonElement);
 		this._register(DOM.addDisposableListener(buttonElement, EventType.Tap, (e: GestureEvent) => {
 			// Ignore this touch if the menu is touched
-			if (this.isOpen && this.focusedMenu.holder && DOM.isAncestor(e.initialTarget as HTMLElement, this.focusedMenu.holder)) {
+			if (this.isOpen && this.focusedMenu && this.focusedMenu.holder && DOM.isAncestor(e.initialTarget as HTMLElement, this.focusedMenu.holder)) {
 				return;
 			}
 
@@ -375,6 +374,10 @@ export class MenuBar extends Disposable {
 
 		DOM.removeNode(this.overflowMenu.titleElement);
 		DOM.removeNode(this.overflowMenu.buttonElement);
+
+		if (this.overflowLayoutScheduled) {
+			this.overflowLayoutScheduled = dispose(this.overflowLayoutScheduled);
+		}
 	}
 
 	blur(): void {
@@ -436,7 +439,7 @@ export class MenuBar extends Disposable {
 
 			this.overflowMenu.actions = [];
 			for (let idx = this.numMenusShown; idx < this.menuCache.length; idx++) {
-				this.overflowMenu.actions.push(new SubmenuAction(this.menuCache[idx].label, this.menuCache[idx].actions));
+				this.overflowMenu.actions.push(new SubmenuAction(this.menuCache[idx].label, this.menuCache[idx].actions || []));
 			}
 
 			DOM.removeNode(this.overflowMenu.buttonElement);
@@ -490,7 +493,12 @@ export class MenuBar extends Disposable {
 			this.updateLabels(menuBarMenu.titleElement, menuBarMenu.buttonElement, menuBarMenu.label);
 		});
 
-		this.updateOverflowAction();
+		if (!this.overflowLayoutScheduled) {
+			this.overflowLayoutScheduled = DOM.scheduleAtNextAnimationFrame(() => {
+				this.updateOverflowAction();
+				this.overflowLayoutScheduled = null;
+			});
+		}
 
 		this.setUnfocusedState();
 	}
@@ -510,6 +518,8 @@ export class MenuBar extends Disposable {
 		if (this.container.style.display !== 'flex') {
 			this.container.style.display = 'flex';
 			this._onVisibilityChange.fire(true);
+
+			this.updateOverflowAction();
 		}
 	}
 
@@ -548,11 +558,11 @@ export class MenuBar extends Disposable {
 				}
 
 				if (isFocused) {
-					this.focusedMenu = null;
+					this.focusedMenu = undefined;
 
 					if (this.focusToReturn) {
 						this.focusToReturn.focus();
-						this.focusToReturn = null;
+						this.focusToReturn = undefined;
 					}
 				}
 
@@ -576,11 +586,11 @@ export class MenuBar extends Disposable {
 						}
 					}
 
-					this.focusedMenu = null;
+					this.focusedMenu = undefined;
 
 					if (this.focusToReturn) {
 						this.focusToReturn.focus();
-						this.focusToReturn = null;
+						this.focusToReturn = undefined;
 					}
 				}
 
@@ -806,7 +816,10 @@ export class MenuBar extends Disposable {
 			}
 
 			if (this.focusedMenu.holder) {
-				DOM.removeClass(this.focusedMenu.holder.parentElement, 'open');
+				if (this.focusedMenu.holder.parentElement) {
+					DOM.removeClass(this.focusedMenu.holder.parentElement, 'open');
+				}
+
 				this.focusedMenu.holder.remove();
 			}
 
@@ -821,6 +834,11 @@ export class MenuBar extends Disposable {
 	private showCustomMenu(menuIndex: number, selectFirst = true): void {
 		const actualMenuIndex = menuIndex >= this.numMenusShown ? MenuBar.OVERFLOW_INDEX : menuIndex;
 		const customMenu = actualMenuIndex === MenuBar.OVERFLOW_INDEX ? this.overflowMenu : this.menuCache[actualMenuIndex];
+
+		if (!customMenu.actions) {
+			return;
+		}
+
 		const menuHolder = $('div.menubar-menu-items-holder');
 
 		DOM.addClass(customMenu.buttonElement, 'open');
@@ -841,12 +859,6 @@ export class MenuBar extends Disposable {
 
 		this._register(menuWidget.onDidCancel(() => {
 			this.focusState = MenubarState.FOCUSED;
-		}));
-
-		this._register(menuWidget.onDidBlur(() => {
-			setTimeout(() => {
-				this.cleanupCustomMenu();
-			}, 100);
 		}));
 
 		if (actualMenuIndex !== menuIndex) {
@@ -889,7 +901,7 @@ class ModifierKeyEmitter extends Emitter<IModifierKeyStatus> {
 			ctrlKey: false
 		};
 
-		this._subscriptions.push(domEvent(document.body, 'keydown')(e => {
+		this._subscriptions.push(domEvent(document.body, 'keydown', true)(e => {
 			const event = new StandardKeyboardEvent(e);
 
 			if (e.altKey && !this._keyStatus.altKey) {
@@ -912,7 +924,8 @@ class ModifierKeyEmitter extends Emitter<IModifierKeyStatus> {
 				this.fire(this._keyStatus);
 			}
 		}));
-		this._subscriptions.push(domEvent(document.body, 'keyup')(e => {
+
+		this._subscriptions.push(domEvent(document.body, 'keyup', true)(e => {
 			if (!e.altKey && this._keyStatus.altKey) {
 				this._keyStatus.lastKeyReleased = 'alt';
 			} else if (!e.ctrlKey && this._keyStatus.ctrlKey) {
@@ -935,10 +948,10 @@ class ModifierKeyEmitter extends Emitter<IModifierKeyStatus> {
 				this.fire(this._keyStatus);
 			}
 		}));
-		this._subscriptions.push(domEvent(document.body, 'mousedown')(e => {
+
+		this._subscriptions.push(domEvent(document.body, 'mousedown', true)(e => {
 			this._keyStatus.lastKeyPressed = undefined;
 		}));
-
 
 		this._subscriptions.push(domEvent(window, 'blur')(e => {
 			this._keyStatus.lastKeyPressed = undefined;
