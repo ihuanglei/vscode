@@ -70,7 +70,7 @@ export class RawDebugSession {
 		debugAdapter: IDebugAdapter,
 		dbgr: IDebugger,
 		private telemetryService: ITelemetryService,
-		public customTelemetryService: ITelemetryService,
+		public customTelemetryService: ITelemetryService | undefined,
 		private environmentService: IEnvironmentService
 	) {
 		this.debugAdapter = debugAdapter;
@@ -487,7 +487,7 @@ export class RawDebugSession {
 		}
 	}
 
-	private dispatchRequest(request: DebugProtocol.Request, dbgr: IDebugger): void {
+	private async dispatchRequest(request: DebugProtocol.Request, dbgr: IDebugger): Promise<void> {
 
 		const response: DebugProtocol.Response = {
 			type: 'response',
@@ -497,7 +497,7 @@ export class RawDebugSession {
 			success: true
 		};
 
-		const safeSendResponse = (response) => this.debugAdapter && this.debugAdapter.sendResponse(response);
+		const safeSendResponse = (response: DebugProtocol.Response) => this.debugAdapter && this.debugAdapter.sendResponse(response);
 
 		switch (request.command) {
 			case 'launchVSCode':
@@ -528,7 +528,7 @@ export class RawDebugSession {
 				break;
 			case 'handshake':
 				try {
-					const vsda = <any>require.__$__nodeRequire('vsda');
+					const vsda = await import('vsda');
 					const obj = new vsda.signer();
 					const sig = obj.sign(request.arguments.value);
 					response.body = {
@@ -581,8 +581,8 @@ export class RawDebugSession {
 			// guess the VS Code workspace path from the executable
 			const vscodeWorkspacePath = runtimeExecutable.substr(0, electronIdx);
 
-			// only add path if user hasn't already added that path
-			const x = spawnArgs.filter(a => a.indexOf(vscodeWorkspacePath) >= 0);
+			// only add VS Code workspace path if user hasn't already added that path as a (folder) argument
+			const x = spawnArgs.filter(a => a.indexOf(vscodeWorkspacePath) === 0);
 			if (x.length === 0) {
 				spawnArgs.unshift(vscodeWorkspacePath);
 			}

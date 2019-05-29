@@ -30,6 +30,7 @@ import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
 import { contrastBorder, editorFindMatch, editorFindMatchBorder, editorFindMatchHighlight, editorFindMatchHighlightBorder, editorFindRangeHighlight, editorFindRangeHighlightBorder, editorWidgetBackground, editorWidgetBorder, editorWidgetResizeBorder, errorForeground, inputActiveOptionBorder, inputBackground, inputBorder, inputForeground, inputValidationErrorBackground, inputValidationErrorBorder, inputValidationErrorForeground, inputValidationInfoBackground, inputValidationInfoBorder, inputValidationInfoForeground, inputValidationWarningBackground, inputValidationWarningBorder, inputValidationWarningForeground, widgetShadow } from 'vs/platform/theme/common/colorRegistry';
 import { ITheme, IThemeService, registerThemingParticipant } from 'vs/platform/theme/common/themeService';
 import { ContextScopedFindInput, ContextScopedHistoryInputBox } from 'vs/platform/browser/contextScopedHistoryWidget';
+import { AccessibilitySupport } from 'vs/platform/accessibility/common/accessibility';
 
 export interface IFindController {
 	replace(): void;
@@ -83,8 +84,8 @@ export class FindWidgetViewZone implements IViewZone {
 export class FindWidget extends Widget implements IOverlayWidget, IHorizontalSashLayoutProvider {
 	private static readonly ID = 'editor.contrib.findWidget';
 	private readonly _codeEditor: ICodeEditor;
-	private _state: FindReplaceState;
-	private _controller: IFindController;
+	private readonly _state: FindReplaceState;
+	private readonly _controller: IFindController;
 	private readonly _contextViewProvider: IContextViewProvider;
 	private readonly _keybindingService: IKeybindingService;
 	private readonly _contextKeyService: IContextKeyService;
@@ -106,16 +107,16 @@ export class FindWidget extends Widget implements IOverlayWidget, IHorizontalSas
 	private _isReplaceVisible: boolean;
 	private _ignoreChangeEvent: boolean;
 
-	private _findFocusTracker: dom.IFocusTracker;
-	private _findInputFocused: IContextKey<boolean>;
-	private _replaceFocusTracker: dom.IFocusTracker;
-	private _replaceInputFocused: IContextKey<boolean>;
+	private readonly _findFocusTracker: dom.IFocusTracker;
+	private readonly _findInputFocused: IContextKey<boolean>;
+	private readonly _replaceFocusTracker: dom.IFocusTracker;
+	private readonly _replaceInputFocused: IContextKey<boolean>;
 	private _viewZone?: FindWidgetViewZone;
 	private _viewZoneId?: number;
 
 	private _resizeSash: Sash;
 	private _resized: boolean;
-	private _updateHistoryDelayer: Delayer<void>;
+	private readonly _updateHistoryDelayer: Delayer<void>;
 
 	constructor(
 		codeEditor: ICodeEditor,
@@ -763,16 +764,12 @@ export class FindWidget extends Widget implements IOverlayWidget, IHorizontalSas
 			appendWholeWordsLabel: this._keybindingLabelFor(FIND_IDS.ToggleWholeWordCommand),
 			appendRegexLabel: this._keybindingLabelFor(FIND_IDS.ToggleRegexCommand),
 			validation: (value: string): InputBoxMessage | null => {
-				if (value.length === 0) {
-					return null;
-				}
-				if (!this._findInput.getRegex()) {
+				if (value.length === 0 || !this._findInput.getRegex()) {
 					return null;
 				}
 				try {
-					/* tslint:disable:no-unused-expression */
+					/* tslint:disable-next-line:no-unused-expression */
 					new RegExp(value);
-					/* tslint:enable:no-unused-expression */
 					return null;
 				} catch (e) {
 					return { content: e.message };
@@ -1003,7 +1000,7 @@ export class FindWidget extends Widget implements IOverlayWidget, IHorizontalSas
 
 	private updateAccessibilitySupport(): void {
 		const value = this._codeEditor.getConfiguration().accessibilitySupport;
-		this._findInput.setFocusInputOnOptionClick(value !== platform.AccessibilitySupport.Enabled);
+		this._findInput.setFocusInputOnOptionClick(value !== AccessibilitySupport.Enabled);
 	}
 }
 

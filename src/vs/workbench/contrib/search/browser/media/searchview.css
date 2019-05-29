@@ -51,6 +51,7 @@
 .search-view .search-widget .monaco-findInput {
 	display: inline-block;
 	vertical-align: middle;
+	width: 100%;
 }
 
 .search-view .search-widget .replace-container {
@@ -392,6 +393,6 @@
 	line-height: 20px;
 }
 
-.vs .panel .search-view .monaco-inputbox {
-	border: 1px solid #ddd;
+.vs .search-panel .search-view .monaco-inputbox {
+	border: 1px solid transparent;
 }

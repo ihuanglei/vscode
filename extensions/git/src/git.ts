@@ -12,7 +12,7 @@ import { EventEmitter } from 'events';
 import iconv = require('iconv-lite');
 import * as filetype from 'file-type';
 import { assign, groupBy, denodeify, IDisposable, toDisposable, dispose, mkdirp, readBytes, detectUnicodeEncoding, Encoding, onceEvent } from './util';
-import { CancellationToken, Uri } from 'vscode';
+import { CancellationToken, Uri, workspace } from 'vscode';
 import { detectEncoding } from './encoding';
 import { Ref, RefType, Branch, Remote, GitErrorCodes, LogOptions, Change, Status } from './api/git';
 
@@ -306,6 +306,8 @@ function getGitErrorCode(stderr: string): string | undefined {
 		return GitErrorCodes.BranchAlreadyExists;
 	} else if (/'.+' is not a valid branch name/.test(stderr)) {
 		return GitErrorCodes.InvalidBranchName;
+	} else if (/Please,? commit your changes or stash them/.test(stderr)) {
+		return GitErrorCodes.DirtyWorkTree;
 	}
 
 	return undefined;
@@ -349,7 +351,7 @@ export class Git {
 		await mkdirp(parentPath);
 
 		try {
-			await this.exec(parentPath, ['clone', url, folderPath], { cancellationToken });
+			await this.exec(parentPath, ['clone', url.includes(' ') ? encodeURI(url) : url, folderPath], { cancellationToken });
 		} catch (err) {
 			if (err.stderr) {
 				err.stderr = err.stderr.replace(/^Cloning.+$/m, '').trim();
@@ -1201,7 +1203,7 @@ export class Repository {
 	}
 
 	async branch(name: string, checkout: boolean, ref?: string): Promise<void> {
-		const args = checkout ? ['checkout', '-q', '-b', name] : ['branch', '-q', name];
+		const args = checkout ? ['checkout', '-q', '-b', name, '--no-track'] : ['branch', '-q', name];
 
 		if (ref) {
 			args.push(ref);
@@ -1360,7 +1362,12 @@ export class Repository {
 	}
 
 	async pull(rebase?: boolean, remote?: string, branch?: string, options: PullOptions = {}): Promise<void> {
-		const args = ['pull', '--tags'];
+		const args = ['pull'];
+		const config = workspace.getConfiguration('git', Uri.file(this.root));
+
+		if (config.get<boolean>('pullTags')) {
+			args.push('--tags');
+		}
 
 		if (options.unshallow) {
 			args.push('--unshallow');
@@ -1456,14 +1463,14 @@ export class Repository {
 
 	async createStash(message?: string, includeUntracked?: boolean): Promise<void> {
 		try {
-			const args = ['stash', 'save'];
+			const args = ['stash', 'push'];
 
 			if (includeUntracked) {
 				args.push('-u');
 			}
 
 			if (message) {
-				args.push('--', message);
+				args.push('-m', message);
 			}
 
 			await this.run(args);
@@ -1569,6 +1576,14 @@ export class Repository {
 
 			return { name: undefined, commit: result.stdout.trim(), type: RefType.Head };
 		}
+	}
+
+	async findTrackingBranches(upstreamBranch: string): Promise<Branch[]> {
+		const result = await this.run(['for-each-ref', '--format', '%(refname:short)%00%(upstream:short)', 'refs/heads']);
+		return result.stdout.trim().split('\n')
+			.map(line => line.trim().split('\0'))
+			.filter(([_, upstream]) => upstream === upstreamBranch)
+			.map(([ref]) => ({ name: ref, type: RefType.Head } as Branch));
 	}
 
 	async getRefs(): Promise<Ref[]> {

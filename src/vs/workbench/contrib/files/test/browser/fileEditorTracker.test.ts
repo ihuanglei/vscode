@@ -5,20 +5,14 @@
 
 import * as assert from 'assert';
 import { FileEditorTracker } from 'vs/workbench/contrib/files/browser/editors/fileEditorTracker';
-import { URI } from 'vs/base/common/uri';
-import { join } from 'vs/base/common/path';
+import { toResource } from 'vs/base/test/common/utils';
 import { IEditorService } from 'vs/workbench/services/editor/common/editorService';
 import { workbenchInstantiationService, TestTextFileService, TestFileService } from 'vs/workbench/test/workbenchTestServices';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
-import { ITextFileService } from 'vs/workbench/services/textfile/common/textfiles';
-import { FileChangesEvent, FileChangeType, IFileService, snapshotToString } from 'vs/platform/files/common/files';
-import { TextFileEditorModel } from 'vs/workbench/services/textfile/common/textFileEditorModel';
+import { ITextFileService, IResolvedTextFileEditorModel, snapshotToString } from 'vs/workbench/services/textfile/common/textfiles';
+import { FileChangesEvent, FileChangeType, IFileService } from 'vs/platform/files/common/files';
 import { IEditorGroupsService } from 'vs/workbench/services/editor/common/editorGroupsService';
 import { timeout } from 'vs/base/common/async';
-
-function toResource(self: any, path: string) {
-	return URI.file(join('C:\\', Buffer.from(self.test.fullTitle()).toString('base64'), path));
-}
 
 class ServiceAccessor {
 	constructor(
@@ -40,26 +34,25 @@ suite('Files - FileEditorTracker', () => {
 		accessor = instantiationService.createInstance(ServiceAccessor);
 	});
 
-	test('file change event updates model', function () {
+	test('file change event updates model', async function () {
 		const tracker = instantiationService.createInstance(FileEditorTracker);
 
-		const resource = toResource(this, '/path/index.txt');
+		const resource = toResource.call(this, '/path/index.txt');
 
-		return accessor.textFileService.models.loadOrCreate(resource).then((model: TextFileEditorModel) => {
-			model.textEditorModel.setValue('Super Good');
-			assert.equal(snapshotToString(model.createSnapshot()!), 'Super Good');
+		const model = await accessor.textFileService.models.loadOrCreate(resource) as IResolvedTextFileEditorModel;
 
-			return model.save().then(() => {
+		model.textEditorModel.setValue('Super Good');
+		assert.equal(snapshotToString(model.createSnapshot()!), 'Super Good');
 
-				// change event (watcher)
-				accessor.fileService.fireFileChanges(new FileChangesEvent([{ resource, type: FileChangeType.UPDATED }]));
+		await model.save();
 
-				return timeout(0).then(() => { // due to event updating model async
-					assert.equal(snapshotToString(model.createSnapshot()!), 'Hello Html');
+		// change event (watcher)
+		accessor.fileService.fireFileChanges(new FileChangesEvent([{ resource, type: FileChangeType.UPDATED }]));
 
-					tracker.dispose();
-				});
-			});
-		});
+		await timeout(0); // due to event updating model async
+
+		assert.equal(snapshotToString(model.createSnapshot()!), 'Hello Html');
+
+		tracker.dispose();
 	});
 });

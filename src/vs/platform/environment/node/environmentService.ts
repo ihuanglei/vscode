@@ -9,8 +9,8 @@ import * as paths from 'vs/base/node/paths';
 import * as os from 'os';
 import * as path from 'vs/base/common/path';
 import { memoize } from 'vs/base/common/decorators';
-import pkg from 'vs/platform/node/package';
-import product from 'vs/platform/node/product';
+import pkg from 'vs/platform/product/node/package';
+import product from 'vs/platform/product/node/product';
 import { toLocalISOString } from 'vs/base/common/date';
 import { isWindows, isLinux } from 'vs/base/common/platform';
 import { getPathFromAmdModule } from 'vs/base/common/amd';
@@ -21,7 +21,9 @@ import { URI } from 'vs/base/common/uri';
 const xdgRuntimeDir = process.env['XDG_RUNTIME_DIR'];
 
 function getNixIPCHandle(userDataPath: string, type: string): string {
-	if (xdgRuntimeDir) {
+	const vscodePortable = process.env['VSCODE_PORTABLE'];
+
+	if (xdgRuntimeDir && !vscodePortable) {
 		const scope = crypto.createHash('md5').update(userDataPath).digest('hex').substr(0, 8);
 		return path.join(xdgRuntimeDir, `vscode-${scope}-${pkg.version}-${type}.sock`);
 	}
@@ -93,6 +95,7 @@ export class EnvironmentService implements IEnvironmentService {
 	@memoize
 	get userDataPath(): string {
 		const vscodePortable = process.env['VSCODE_PORTABLE'];
+
 		if (vscodePortable) {
 			return path.join(vscodePortable, 'user-data');
 		}
@@ -109,6 +112,12 @@ export class EnvironmentService implements IEnvironmentService {
 
 	@memoize
 	get appSettingsPath(): string { return path.join(this.appSettingsHome, 'settings.json'); }
+
+	@memoize
+	get machineSettingsHome(): string { return path.join(this.userDataPath, 'Machine'); }
+
+	@memoize
+	get machineSettingsPath(): string { return path.join(this.machineSettingsHome, 'settings.json'); }
 
 	@memoize
 	get globalStorageHome(): string { return path.join(this.appSettingsHome, 'globalStorage'); }
@@ -164,6 +173,7 @@ export class EnvironmentService implements IEnvironmentService {
 		}
 
 		const vscodePortable = process.env['VSCODE_PORTABLE'];
+
 		if (vscodePortable) {
 			return path.join(vscodePortable, 'extensions');
 		}
@@ -172,8 +182,27 @@ export class EnvironmentService implements IEnvironmentService {
 	}
 
 	@memoize
-	get extensionDevelopmentLocationURI(): URI | undefined {
+	get extensionDevelopmentLocationURI(): URI[] | undefined {
 		const s = this._args.extensionDevelopmentPath;
+		if (Array.isArray(s)) {
+			return s.map(p => {
+				if (/^[^:/?#]+?:\/\//.test(p)) {
+					return URI.parse(p);
+				}
+				return URI.file(path.normalize(p));
+			});
+		} else if (s) {
+			if (/^[^:/?#]+?:\/\//.test(s)) {
+				return [URI.parse(s)];
+			}
+			return [URI.file(path.normalize(s))];
+		}
+		return undefined;
+	}
+
+	@memoize
+	get extensionTestsLocationURI(): URI | undefined {
+		const s = this._args.extensionTestsPath;
 		if (s) {
 			if (/^[^:/?#]+?:\/\//.test(s)) {
 				return URI.parse(s);
@@ -182,9 +211,6 @@ export class EnvironmentService implements IEnvironmentService {
 		}
 		return undefined;
 	}
-
-	@memoize
-	get extensionTestsPath(): string | undefined { return this._args.extensionTestsPath ? path.normalize(this._args.extensionTestsPath) : this._args.extensionTestsPath; }
 
 	get disableExtensions(): boolean | string[] {
 		if (this._args['disable-extensions']) {

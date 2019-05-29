@@ -23,8 +23,12 @@
 	display: none;
 }
 
-.monaco-editor-hover .hover-row {
+.monaco-editor-hover .hover-contents {
 	padding: 4px 8px;
+}
+
+.monaco-editor-hover .markdown-hover > .hover-contents:not(.code-hover-contents) {
+	max-width: 500px;
 }
 
 .monaco-editor-hover p,
@@ -72,39 +76,20 @@
 	word-break: break-all;
 }
 
-.monaco-editor-hover .marker-hover {
+.monaco-editor-hover .hover-row.status-bar {
+	font-size: 12px;
+	line-height: 22px;
+}
+
+.monaco-editor-hover .hover-row.status-bar .actions {
 	display: flex;
 }
 
-.monaco-editor-hover .marker-hover > .marker {
-	flex: 1;
-}
-
-.monaco-editor-hover .marker-hover > .actions {
-	padding-left: 12px;
-	display: flex;
-}
-
-.monaco-editor-hover .marker-hover > .actions > .icon {
-	width: 16px;
-	height: 16px;
-}
-
-.monaco-editor-hover .marker-hover > .actions .action {
+.monaco-editor-hover .hover-row.status-bar .actions .action-container {
+	margin: 0px 8px;
 	cursor: pointer;
-	padding-left: 4px;
 }
 
-.monaco-editor-hover .marker-hover > .actions > .peek-marker {
-	font-size: large;
-	vertical-align: middle;
-}
-
-.monaco-editor-hover .marker-hover > .actions > .light-bulb {
-	background: url('../codeAction/lightbulb.svg') center center no-repeat;
-}
-
-.hc-black .monaco-editor-hover .marker-hover > .actions > .light-bulb,
-.vs-dark  .monaco-editor-hover .marker-hover > .actions > .light-bulb {
-	background: url('../codeAction/lightbulb-dark.svg') center center no-repeat;
+.monaco-editor-hover .hover-row.status-bar .actions .action-container .action .icon {
+	padding-right: 4px;
 }

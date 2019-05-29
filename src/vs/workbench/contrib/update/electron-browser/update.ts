@@ -6,10 +6,10 @@
 import * as nls from 'vs/nls';
 import severity from 'vs/base/common/severity';
 import { IAction, Action } from 'vs/base/common/actions';
-import { IDisposable, dispose, Disposable } from 'vs/base/common/lifecycle';
+import { IDisposable, Disposable } from 'vs/base/common/lifecycle';
 import { Separator } from 'vs/base/browser/ui/actionbar/actionbar';
-import pkg from 'vs/platform/node/package';
-import product from 'vs/platform/node/product';
+import pkg from 'vs/platform/product/node/package';
+import product from 'vs/platform/product/node/product';
 import { URI } from 'vs/base/common/uri';
 import { IActivityService, NumberBadge, IBadge, ProgressBadge } from 'vs/workbench/services/activity/common/activity';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
@@ -23,7 +23,7 @@ import * as semver from 'semver';
 import { IEnvironmentService } from 'vs/platform/environment/common/environment';
 import { INotificationService, INotificationHandle, Severity } from 'vs/platform/notification/common/notification';
 import { IDialogService } from 'vs/platform/dialogs/common/dialogs';
-import { IWindowService } from 'vs/platform/windows/common/windows';
+import { IWorkbenchEnvironmentService } from 'vs/workbench/services/environment/common/environmentService';
 import { ReleaseNotesManager } from './releaseNotesEditor';
 import { isWindows } from 'vs/base/common/platform';
 import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
@@ -212,6 +212,53 @@ export class Win3264BitContribution implements IWorkbenchContribution {
 	}
 }
 
+export class Linux32BitContribution implements IWorkbenchContribution {
+
+	private static readonly KEY = 'update/linux32-64bits';
+	private static readonly URL = 'https://code.visualstudio.com/updates/v1_32#_linux-32-bit-support-ends-soon';
+	private static readonly INSIDER_URL = 'https://github.com/Microsoft/vscode-docs/blob/vnext/release-notes/v1_32.md#linux-32-bit-support-ends-soon';
+
+	constructor(
+		@IStorageService storageService: IStorageService,
+		@INotificationService notificationService: INotificationService,
+		@IEnvironmentService environmentService: IEnvironmentService
+	) {
+		if (environmentService.disableUpdates) {
+			return;
+		}
+
+		const neverShowAgain = new NeverShowAgain(Linux32BitContribution.KEY, storageService);
+
+		if (!neverShowAgain.shouldShow()) {
+			return;
+		}
+
+		const url = product.quality === 'insider'
+			? Linux32BitContribution.INSIDER_URL
+			: Linux32BitContribution.URL;
+
+		const handle = notificationService.prompt(
+			severity.Info,
+			nls.localize('linux64bits', "{0} for 32-bit Linux will soon be discontinued. Please update to the 64-bit version.", product.nameShort, url),
+			[{
+				label: nls.localize('learnmore', "Learn More"),
+				run: () => {
+					window.open(url);
+				}
+			},
+			{
+				label: nls.localize('neveragain', "Don't Show Again"),
+				isSecondary: true,
+				run: () => {
+					neverShowAgain.action.run(handle);
+					neverShowAgain.action.dispose();
+				}
+			}],
+			{ sticky: true }
+		);
+	}
+}
+
 class CommandAction extends Action {
 
 	constructor(
@@ -223,7 +270,7 @@ class CommandAction extends Action {
 	}
 }
 
-export class UpdateContribution implements IGlobalActivity {
+export class UpdateContribution extends Disposable implements IGlobalActivity {
 
 	private static readonly showCommandsId = 'workbench.action.showCommands';
 	private static readonly openSettingsId = 'workbench.action.openSettings';
@@ -239,7 +286,6 @@ export class UpdateContribution implements IGlobalActivity {
 
 	private state: UpdateState;
 	private badgeDisposable: IDisposable = Disposable.None;
-	private disposables: IDisposable[] = [];
 
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
@@ -249,11 +295,12 @@ export class UpdateContribution implements IGlobalActivity {
 		@IDialogService private readonly dialogService: IDialogService,
 		@IUpdateService private readonly updateService: IUpdateService,
 		@IActivityService private readonly activityService: IActivityService,
-		@IWindowService private readonly windowService: IWindowService
+		@IWorkbenchEnvironmentService private readonly environmentService: IWorkbenchEnvironmentService
 	) {
+		super();
 		this.state = updateService.state;
 
-		updateService.onStateChange(this.onUpdateStateChange, this, this.disposables);
+		this._register(updateService.onStateChange(this.onUpdateStateChange, this));
 		this.onUpdateStateChange(this.updateService.state);
 
 		/*
@@ -279,7 +326,7 @@ export class UpdateContribution implements IGlobalActivity {
 			case StateType.Idle:
 				if (state.error) {
 					this.onError(state.error);
-				} else if (this.state.type === StateType.CheckingForUpdates && this.state.context && this.state.context.windowId === this.windowService.getCurrentWindowId()) {
+				} else if (this.state.type === StateType.CheckingForUpdates && this.state.context && this.state.context.windowId === this.environmentService.configuration.windowId) {
 					this.onUpdateNotAvailable();
 				}
 				break;
@@ -465,7 +512,7 @@ export class UpdateContribution implements IGlobalActivity {
 			this.storageService.store('update/updateNotificationTime', currentMillis, StorageScope.GLOBAL);
 		}
 
-		const updateNotificationMillis = this.storageService.getInteger('update/updateNotificationTime', StorageScope.GLOBAL, currentMillis);
+		const updateNotificationMillis = this.storageService.getNumber('update/updateNotificationTime', StorageScope.GLOBAL, currentMillis);
 		const diffDays = (currentMillis - updateNotificationMillis) / (1000 * 60 * 60 * 24);
 
 		return diffDays > 5;
@@ -502,7 +549,7 @@ export class UpdateContribution implements IGlobalActivity {
 				return null;
 
 			case StateType.Idle:
-				const windowId = this.windowService.getCurrentWindowId();
+				const windowId = this.environmentService.configuration.windowId;
 				return new Action('update.check', nls.localize('checkForUpdates', "Check for Updates..."), undefined, true, () =>
 					this.updateService.checkForUpdates({ windowId }));
 
@@ -524,12 +571,8 @@ export class UpdateContribution implements IGlobalActivity {
 				return new Action('update.updating', nls.localize('installingUpdate', "Installing Update..."), undefined, false);
 
 			case StateType.Ready:
-				return new Action('update.restart', nls.localize('restartToUpdate', "Restart to Update..."), undefined, true, () =>
+				return new Action('update.restart', nls.localize('restartToUpdate', "Restart to Update"), undefined, true, () =>
 					this.updateService.quitAndInstall());
 		}
-	}
-
-	dispose(): void {
-		this.disposables = dispose(this.disposables);
 	}
 }

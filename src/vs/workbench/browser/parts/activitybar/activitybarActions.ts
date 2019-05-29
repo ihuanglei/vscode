@@ -7,7 +7,6 @@ import 'vs/css!./media/activityaction';
 import * as nls from 'vs/nls';
 import * as DOM from 'vs/base/browser/dom';
 import { StandardKeyboardEvent } from 'vs/base/browser/keyboardEvent';
-import { StandardMouseEvent } from 'vs/base/browser/mouseEvent';
 import { EventType as TouchEventType, GestureEvent } from 'vs/base/browser/touch';
 import { Action } from 'vs/base/common/actions';
 import { KeyCode } from 'vs/base/common/keyCodes';
@@ -19,13 +18,13 @@ import { Registry } from 'vs/platform/registry/common/platform';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
 import { activeContrastBorder, focusBorder } from 'vs/platform/theme/common/colorRegistry';
 import { ICssStyleCollector, ITheme, IThemeService, registerThemingParticipant } from 'vs/platform/theme/common/themeService';
-import { ActivityAction, ActivityActionItem, ICompositeBar, ICompositeBarColors, ToggleCompositePinnedAction } from 'vs/workbench/browser/parts/compositeBarActions';
+import { ActivityAction, ActivityActionViewItem, ICompositeBar, ICompositeBarColors, ToggleCompositePinnedAction } from 'vs/workbench/browser/parts/compositeBarActions';
 import { ViewletDescriptor } from 'vs/workbench/browser/viewlet';
 import { Extensions as ActionExtensions, IWorkbenchActionRegistry } from 'vs/workbench/common/actions';
 import { IActivity, IGlobalActivity } from 'vs/workbench/common/activity';
 import { ACTIVITY_BAR_FOREGROUND } from 'vs/workbench/common/theme';
-import { IActivityService } from 'vs/workbench/services/activity/common/activity';
-import { IPartService, Parts } from 'vs/workbench/services/part/common/partService';
+import { IActivityBarService } from 'vs/workbench/services/activityBar/browser/activityBarService';
+import { IWorkbenchLayoutService, Parts } from 'vs/workbench/services/layout/browser/layoutService';
 import { IViewletService } from 'vs/workbench/services/viewlet/browser/viewlet';
 
 export class ViewletActivityAction extends ActivityAction {
@@ -37,36 +36,37 @@ export class ViewletActivityAction extends ActivityAction {
 	constructor(
 		activity: IActivity,
 		@IViewletService private readonly viewletService: IViewletService,
-		@IPartService private readonly partService: IPartService,
+		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
 		@ITelemetryService private readonly telemetryService: ITelemetryService
 	) {
 		super(activity);
 	}
 
-	run(event: any): Promise<any> {
+	async run(event: any): Promise<any> {
 		if (event instanceof MouseEvent && event.button === 2) {
-			return Promise.resolve(false); // do not run on right click
+			return false; // do not run on right click
 		}
 
 		// prevent accident trigger on a doubleclick (to help nervous people)
 		const now = Date.now();
 		if (now > this.lastRun /* https://github.com/Microsoft/vscode/issues/25830 */ && now - this.lastRun < ViewletActivityAction.preventDoubleClickDelay) {
-			return Promise.resolve(true);
+			return true;
 		}
 		this.lastRun = now;
 
-		const sideBarVisible = this.partService.isVisible(Parts.SIDEBAR_PART);
+		const sideBarVisible = this.layoutService.isVisible(Parts.SIDEBAR_PART);
 		const activeViewlet = this.viewletService.getActiveViewlet();
 
 		// Hide sidebar if selected viewlet already visible
 		if (sideBarVisible && activeViewlet && activeViewlet.getId() === this.activity.id) {
 			this.logAction('hide');
-			this.partService.setSideBarHidden(true);
-			return Promise.resolve();
+			this.layoutService.setSideBarHidden(true);
+			return true;
 		}
 
 		this.logAction('show');
-		return this.viewletService.openViewlet(this.activity.id, true).then(() => this.activate());
+		await this.viewletService.openViewlet(this.activity.id, true);
+		return this.activate();
 	}
 
 	private logAction(action: string) {
@@ -84,19 +84,19 @@ export class ToggleViewletAction extends Action {
 
 	constructor(
 		private _viewlet: ViewletDescriptor,
-		@IPartService private readonly partService: IPartService,
+		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
 		@IViewletService private readonly viewletService: IViewletService
 	) {
 		super(_viewlet.id, _viewlet.name);
 	}
 
 	run(): Promise<any> {
-		const sideBarVisible = this.partService.isVisible(Parts.SIDEBAR_PART);
+		const sideBarVisible = this.layoutService.isVisible(Parts.SIDEBAR_PART);
 		const activeViewlet = this.viewletService.getActiveViewlet();
 
 		// Hide sidebar if selected viewlet already visible
 		if (sideBarVisible && activeViewlet && activeViewlet.getId() === this._viewlet.id) {
-			this.partService.setSideBarHidden(true);
+			this.layoutService.setSideBarHidden(true);
 			return Promise.resolve();
 		}
 
@@ -111,7 +111,7 @@ export class GlobalActivityAction extends ActivityAction {
 	}
 }
 
-export class GlobalActivityActionItem extends ActivityActionItem {
+export class GlobalActivityActionViewItem extends ActivityActionViewItem {
 
 	constructor(
 		action: GlobalActivityAction,
@@ -130,32 +130,29 @@ export class GlobalActivityActionItem extends ActivityActionItem {
 
 		this._register(DOM.addDisposableListener(this.container, DOM.EventType.MOUSE_DOWN, (e: MouseEvent) => {
 			DOM.EventHelper.stop(e, true);
-
-			const event = new StandardMouseEvent(e);
-			this.showContextMenu({ x: event.posx, y: event.posy });
+			this.showContextMenu();
 		}));
 
 		this._register(DOM.addDisposableListener(this.container, DOM.EventType.KEY_UP, (e: KeyboardEvent) => {
 			let event = new StandardKeyboardEvent(e);
 			if (event.equals(KeyCode.Enter) || event.equals(KeyCode.Space)) {
 				DOM.EventHelper.stop(e, true);
-
-				this.showContextMenu(this.container);
+				this.showContextMenu();
 			}
 		}));
 
 		this._register(DOM.addDisposableListener(this.container, TouchEventType.Tap, (e: GestureEvent) => {
 			DOM.EventHelper.stop(e, true);
-
-			const event = new StandardMouseEvent(e);
-			this.showContextMenu({ x: event.posx, y: event.posy });
+			this.showContextMenu();
 		}));
 	}
 
-	private showContextMenu(location: HTMLElement | { x: number, y: number }): void {
+	private showContextMenu(): void {
 		const globalAction = this._action as GlobalActivityAction;
 		const activity = globalAction.activity as IGlobalActivity;
 		const actions = activity.getActions();
+		const containerPosition = DOM.getDomNodePagePosition(this.container);
+		const location = { x: containerPosition.left + containerPosition.width / 2, y: containerPosition.top };
 
 		this.contextMenuService.showContextMenu({
 			getAnchor: () => location,
@@ -170,10 +167,10 @@ export class PlaceHolderViewletActivityAction extends ViewletActivityAction {
 	constructor(
 		id: string, iconUrl: URI,
 		@IViewletService viewletService: IViewletService,
-		@IPartService partService: IPartService,
+		@IWorkbenchLayoutService layoutService: IWorkbenchLayoutService,
 		@ITelemetryService telemetryService: ITelemetryService
 	) {
-		super({ id, name: id, cssClass: `extensionViewlet-placeholder-${id.replace(/\./g, '-')}` }, viewletService, partService, telemetryService);
+		super({ id, name: id, cssClass: `extensionViewlet-placeholder-${id.replace(/\./g, '-')}` }, viewletService, layoutService, telemetryService);
 
 		const iconClass = `.monaco-workbench .activitybar .monaco-action-bar .action-label.${this.class}`; // Generate Placeholder CSS to show the icon in the activity bar
 		DOM.createCSSRule(iconClass, `-webkit-mask: url('${iconUrl || ''}') no-repeat 50% 50%`);
@@ -201,13 +198,13 @@ class SwitchSideBarViewAction extends Action {
 		id: string,
 		name: string,
 		@IViewletService private readonly viewletService: IViewletService,
-		@IActivityService private readonly activityService: IActivityService
+		@IActivityBarService private readonly activityBarService: IActivityBarService
 	) {
 		super(id, name);
 	}
 
 	run(offset: number): Promise<any> {
-		const pinnedViewletIds = this.activityService.getPinnedViewletIds();
+		const pinnedViewletIds = this.activityBarService.getPinnedViewletIds();
 
 		const activeViewlet = this.viewletService.getActiveViewlet();
 		if (!activeViewlet) {
@@ -233,9 +230,9 @@ export class PreviousSideBarViewAction extends SwitchSideBarViewAction {
 		id: string,
 		name: string,
 		@IViewletService viewletService: IViewletService,
-		@IActivityService activityService: IActivityService
+		@IActivityBarService activityBarService: IActivityBarService
 	) {
-		super(id, name, viewletService, activityService);
+		super(id, name, viewletService, activityBarService);
 	}
 
 	run(): Promise<any> {
@@ -252,9 +249,9 @@ export class NextSideBarViewAction extends SwitchSideBarViewAction {
 		id: string,
 		name: string,
 		@IViewletService viewletService: IViewletService,
-		@IActivityService activityService: IActivityService
+		@IActivityBarService activityBarService: IActivityBarService
 	) {
-		super(id, name, viewletService, activityService);
+		super(id, name, viewletService, activityBarService);
 	}
 
 	run(): Promise<any> {

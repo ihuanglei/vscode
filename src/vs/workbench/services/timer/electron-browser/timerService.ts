@@ -7,9 +7,8 @@ import { createDecorator } from 'vs/platform/instantiation/common/instantiation'
 import { virtualMachineHint } from 'vs/base/node/id';
 import * as perf from 'vs/base/common/performance';
 import * as os from 'os';
-import { getAccessibilitySupport } from 'vs/base/browser/browser';
-import { AccessibilitySupport } from 'vs/base/common/platform';
-import { IWindowService, IWindowsService } from 'vs/platform/windows/common/windows';
+import { IWindowsService } from 'vs/platform/windows/common/windows';
+import { IWorkbenchEnvironmentService } from 'vs/workbench/services/environment/common/environmentService';
 import { IWorkspaceContextService, WorkbenchState } from 'vs/platform/workspace/common/workspace';
 import { IExtensionService } from 'vs/workbench/services/extensions/common/extensions';
 import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
@@ -19,7 +18,7 @@ import { ILifecycleService } from 'vs/platform/lifecycle/common/lifecycle';
 import { IViewletService } from 'vs/workbench/services/viewlet/browser/viewlet';
 import { IPanelService } from 'vs/workbench/services/panel/common/panelService';
 import { IEditorService } from 'vs/workbench/services/editor/common/editorService';
-
+import { IAccessibilityService, AccessibilitySupport } from 'vs/platform/accessibility/common/accessibility';
 
 /* __GDPR__FRAGMENT__
 	"IMemoryInfo" : {
@@ -41,6 +40,7 @@ export interface IMemoryInfo {
 		"version" : { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth" },
 		"ellapsed" : { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "isMeasurement": true },
 		"isLatestVersion": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth" },
+		"isRemoteWindow": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth" },
 		"didUseCachedData": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth" },
 		"windowKind": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth" },
 		"windowCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth" },
@@ -53,7 +53,6 @@ export interface IMemoryInfo {
 		"timers.ellapsedExtensions" : { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "isMeasurement": true },
 		"timers.ellapsedExtensionsReady" : { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "isMeasurement": true },
 		"timers.ellapsedRequire" : { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "isMeasurement": true },
-		"timers.ellapsedGlobalStorageInitMain" : { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "isMeasurement": true },
 		"timers.ellapsedWorkspaceStorageInit" : { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "isMeasurement": true },
 		"timers.ellapsedWorkspaceServiceInit" : { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "isMeasurement": true },
 		"timers.ellapsedViewletRestore" : { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "isMeasurement": true },
@@ -100,6 +99,11 @@ export interface IStartupMetrics {
 	 * measurement.
 	 */
 	readonly isLatestVersion: boolean;
+
+	/**
+	 * Whether this window talks to a remote endpoint.
+	 */
+	readonly isRemoteWindow: boolean;
 
 	/**
 	 * Whether we asked for and V8 accepted cached data.
@@ -194,15 +198,6 @@ export interface IStartupMetrics {
 		 *
 		 */
 		readonly ellapsedWindowLoadToRequire: number;
-
-		/**
-		 * The time it took to require the global storage DB, connect to it
-		 * and load the initial set of values.
-		 *
-		 * * Happens in the main-process
-		 * * Measured with the `main:willInitGlobalStorage` and `main:didInitGlobalStorage` performance marks.
-		 */
-		readonly ellapsedGlobalStorageInitMain: number;
 
 		/**
 		 * The time it took to require the workspace storage DB, connect to it
@@ -323,7 +318,7 @@ class TimerService implements ITimerService {
 
 	constructor(
 		@IWindowsService private readonly _windowsService: IWindowsService,
-		@IWindowService private readonly _windowService: IWindowService,
+		@IWorkbenchEnvironmentService private readonly _environmentService: IWorkbenchEnvironmentService,
 		@ILifecycleService private readonly _lifecycleService: ILifecycleService,
 		@IWorkspaceContextService private readonly _contextService: IWorkspaceContextService,
 		@IExtensionService private readonly _extensionService: IExtensionService,
@@ -331,6 +326,7 @@ class TimerService implements ITimerService {
 		@IViewletService private readonly _viewletService: IViewletService,
 		@IPanelService private readonly _panelService: IPanelService,
 		@IEditorService private readonly _editorService: IEditorService,
+		@IAccessibilityService private readonly _accessibilityService: IAccessibilityService
 	) { }
 
 	get startupMetrics(): Promise<IStartupMetrics> {
@@ -345,7 +341,7 @@ class TimerService implements ITimerService {
 	private async _computeStartupMetrics(): Promise<IStartupMetrics> {
 
 		const now = Date.now();
-		const initialStartup = !!this._windowService.getConfiguration().isInitialStartup;
+		const initialStartup = !!this._environmentService.configuration.isInitialStartup;
 		const startMark = initialStartup ? 'main:started' : 'main:loadWindow';
 
 		let totalmem: number | undefined;
@@ -385,6 +381,7 @@ class TimerService implements ITimerService {
 
 			// reflections
 			isLatestVersion: Boolean(await this._updateService.isLatestVersion()),
+			isRemoteWindow: Boolean(this._environmentService.configuration.remoteAuthority),
 			didUseCachedData: didUseCachedData(),
 			windowKind: this._lifecycleService.startupKind,
 			windowCount: await this._windowsService.getWindowCount(),
@@ -399,7 +396,6 @@ class TimerService implements ITimerService {
 				ellapsedWindowLoad: initialStartup ? perf.getDuration('main:appReady', 'main:loadWindow') : undefined,
 				ellapsedWindowLoadToRequire: perf.getDuration('main:loadWindow', 'willLoadWorkbenchMain'),
 				ellapsedRequire: perf.getDuration('willLoadWorkbenchMain', 'didLoadWorkbenchMain'),
-				ellapsedGlobalStorageInitMain: perf.getDuration('main:willInitGlobalStorage', 'main:didInitGlobalStorage'),
 				ellapsedWorkspaceStorageInit: perf.getDuration('willInitWorkspaceStorage', 'didInitWorkspaceStorage'),
 				ellapsedWorkspaceServiceInit: perf.getDuration('willInitWorkspaceService', 'didInitWorkspaceService'),
 				ellapsedExtensions: perf.getDuration('willLoadExtensions', 'didLoadExtensions'),
@@ -422,7 +418,7 @@ class TimerService implements ITimerService {
 			loadavg,
 			initialStartup,
 			isVMLikelyhood,
-			hasAccessibilitySupport: getAccessibilitySupport() === AccessibilitySupport.Enabled,
+			hasAccessibilitySupport: this._accessibilityService.getAccessibilitySupport() === AccessibilitySupport.Enabled,
 			emptyWorkbench: this._contextService.getWorkbenchState() === WorkbenchState.EMPTY
 		};
 	}

@@ -12,6 +12,7 @@ import { Position } from 'vs/editor/common/core/position';
 import { ScrollType } from 'vs/editor/common/editorCommon';
 import { CodeAction } from 'vs/editor/common/modes';
 import { IContextMenuService } from 'vs/platform/contextview/browser/contextView';
+import { CodeActionSet } from 'vs/editor/contrib/codeAction/codeAction';
 
 export class CodeActionContextMenu {
 
@@ -26,13 +27,14 @@ export class CodeActionContextMenu {
 		private readonly _onApplyCodeAction: (action: CodeAction) => Promise<any>
 	) { }
 
-	async show(actionsToShow: Promise<CodeAction[]>, at?: { x: number; y: number } | Position): Promise<void> {
+	async show(actionsToShow: Promise<CodeActionSet>, at?: { x: number; y: number } | Position): Promise<void> {
 		const codeActions = await actionsToShow;
 		if (!this._editor.getDomNode()) {
 			// cancel when editor went off-dom
 			return Promise.reject(canceled());
 		}
-		const actions = codeActions.map(action => this.codeActionToAction(action));
+		this._visible = true;
+		const actions = codeActions.actions.map(action => this.codeActionToAction(action));
 		this._contextMenuService.showContextMenu({
 			getAnchor: () => {
 				if (Position.isIPosition(at)) {
@@ -51,7 +53,7 @@ export class CodeActionContextMenu {
 
 	private codeActionToAction(action: CodeAction): Action {
 		const id = action.command ? action.command.id : action.title;
-		const title = action.isPreferred ? `${action.title} ★` : action.title;
+		const title = action.title;
 		return new Action(id, title, undefined, true, () =>
 			this._onApplyCodeAction(action)
 				.finally(() => this._onDidExecuteCodeAction.fire(undefined)));

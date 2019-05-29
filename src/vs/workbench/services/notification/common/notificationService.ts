@@ -5,8 +5,9 @@
 
 import { INotificationService, INotification, INotificationHandle, Severity, NotificationMessage, INotificationActions, IPromptChoice, IPromptOptions } from 'vs/platform/notification/common/notification';
 import { INotificationsModel, NotificationsModel, ChoiceAction } from 'vs/workbench/common/notifications';
-import { dispose, Disposable, IDisposable } from 'vs/base/common/lifecycle';
+import { Disposable, DisposableStore } from 'vs/base/common/lifecycle';
 import { Event } from 'vs/base/common/event';
+import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
 
 export class NotificationService extends Disposable implements INotificationService {
 
@@ -53,7 +54,7 @@ export class NotificationService extends Disposable implements INotificationServ
 	}
 
 	prompt(severity: Severity, message: string, choices: IPromptChoice[], options?: IPromptOptions): INotificationHandle {
-		const toDispose: IDisposable[] = [];
+		const toDispose = new DisposableStore();
 
 		let choiceClicked = false;
 		let handle: INotificationHandle;
@@ -75,7 +76,7 @@ export class NotificationService extends Disposable implements INotificationServ
 			}
 
 			// React to action being clicked
-			toDispose.push(action.onDidRun(() => {
+			toDispose.add(action.onDidRun(() => {
 				choiceClicked = true;
 
 				// Close notification unless we are told to keep open
@@ -84,7 +85,7 @@ export class NotificationService extends Disposable implements INotificationServ
 				}
 			}));
 
-			toDispose.push(action);
+			toDispose.add(action);
 		});
 
 		// Show notification with actions
@@ -93,7 +94,7 @@ export class NotificationService extends Disposable implements INotificationServ
 		Event.once(handle.onDidClose)(() => {
 
 			// Cleanup when notification gets disposed
-			dispose(toDispose);
+			toDispose.dispose();
 
 			// Indicate cancellation to the outside if no action was executed
 			if (options && typeof options.onCancel === 'function' && !choiceClicked) {
@@ -104,3 +105,5 @@ export class NotificationService extends Disposable implements INotificationServ
 		return handle;
 	}
 }
+
+registerSingleton(INotificationService, NotificationService, true);

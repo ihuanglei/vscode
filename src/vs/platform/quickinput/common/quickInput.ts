@@ -53,6 +53,16 @@ export interface IPickOptions<T extends IQuickPickItem> {
 	matchOnDetail?: boolean;
 
 	/**
+	 * an optional flag to filter the picks based on label. Defaults to true.
+	 */
+	matchOnLabel?: boolean;
+
+	/**
+	 * an option flag to control whether focus is always automatically brought to a list item. Defaults to true.
+	 */
+	autoFocusOnList?: boolean;
+
+	/**
 	 * an optional flag to not close the picker on focus lost
 	 */
 	ignoreFocusLost?: boolean;
@@ -152,6 +162,16 @@ export interface IQuickPick<T extends IQuickPickItem> extends IQuickInput {
 
 	readonly onDidAccept: Event<void>;
 
+	ok: boolean;
+
+	readonly onDidCustom: Event<void>;
+
+	customButton: boolean;
+
+	customLabel: string;
+
+	customHover: string;
+
 	buttons: ReadonlyArray<IQuickInputButton>;
 
 	readonly onDidTriggerButton: Event<IQuickInputButton>;
@@ -166,6 +186,10 @@ export interface IQuickPick<T extends IQuickPickItem> extends IQuickInput {
 
 	matchOnDetail: boolean;
 
+	matchOnLabel: boolean;
+
+	autoFocusOnList: boolean;
+
 	quickNavigate: IQuickNavigateConfiguration | undefined;
 
 	activeItems: ReadonlyArray<T>;
@@ -177,6 +201,12 @@ export interface IQuickPick<T extends IQuickPickItem> extends IQuickInput {
 	readonly onDidChangeSelection: Event<T[]>;
 
 	readonly keyMods: IKeyMods;
+
+	valueSelection: Readonly<[number, number]> | undefined;
+
+	validationMessage: string | undefined;
+
+	inputHasFocus(): boolean;
 }
 
 export interface IInputBox extends IQuickInput {

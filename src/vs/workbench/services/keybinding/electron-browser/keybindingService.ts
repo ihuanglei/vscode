@@ -22,7 +22,7 @@ import { ContextKeyExpr, IContextKeyService } from 'vs/platform/contextkey/commo
 import { IEnvironmentService } from 'vs/platform/environment/common/environment';
 import { Extensions, IJSONContributionRegistry } from 'vs/platform/jsonschemas/common/jsonContributionRegistry';
 import { AbstractKeybindingService } from 'vs/platform/keybinding/common/abstractKeybindingService';
-import { IKeybindingEvent, IKeyboardEvent, IUserFriendlyKeybinding, KeybindingSource } from 'vs/platform/keybinding/common/keybinding';
+import { IKeybindingEvent, IKeyboardEvent, IUserFriendlyKeybinding, KeybindingSource, IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
 import { KeybindingResolver } from 'vs/platform/keybinding/common/keybindingResolver';
 import { IKeybindingItem, IKeybindingRule2, KeybindingWeight, KeybindingsRegistry } from 'vs/platform/keybinding/common/keybindingsRegistry';
 import { ResolvedKeybindingItem } from 'vs/platform/keybinding/common/resolvedKeybindingItem';
@@ -39,6 +39,8 @@ import { IMacLinuxKeyboardMapping, MacLinuxKeyboardMapper, macLinuxKeyboardMappi
 import { IWindowsKeyboardMapping, WindowsKeyboardMapper, windowsKeyboardMappingEquals } from 'vs/workbench/services/keybinding/common/windowsKeyboardMapper';
 import { IWindowService } from 'vs/platform/windows/common/windows';
 import { IExtensionService } from 'vs/workbench/services/extensions/common/extensions';
+import { MenuRegistry } from 'vs/platform/actions/common/actions';
+import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
 
 export class KeyboardMapperFactory {
 	public static readonly INSTANCE = new KeyboardMapperFactory();
@@ -236,7 +238,6 @@ let keybindingType: IJSONSchema = {
 };
 
 const keybindingsExtPoint = ExtensionsRegistry.registerExtensionPoint<ContributedKeyBinding | ContributedKeyBinding[]>({
-	isDynamic: true,
 	extensionPoint: 'keybindings',
 	jsonSchema: {
 		description: nls.localize('vscode.extension.contributes.keybindings', "Contributes keybindings."),
@@ -269,7 +270,6 @@ export class WorkbenchKeybindingService extends AbstractKeybindingService {
 	private userKeybindings: ConfigWatcher<IUserFriendlyKeybinding[]>;
 
 	constructor(
-		windowElement: Window,
 		@IContextKeyService contextKeyService: IContextKeyService,
 		@ICommandService commandService: ICommandService,
 		@ITelemetryService telemetryService: ITelemetryService,
@@ -326,7 +326,7 @@ export class WorkbenchKeybindingService extends AbstractKeybindingService {
 			keybindings: event.config
 		})));
 
-		this._register(dom.addDisposableListener(windowElement, dom.EventType.KEY_DOWN, (e: KeyboardEvent) => {
+		this._register(dom.addDisposableListener(window, dom.EventType.KEY_DOWN, (e: KeyboardEvent) => {
 			let keyEvent = new StandardKeyboardEvent(e);
 			let shouldPreventDefault = this._dispatch(keyEvent, keyEvent.target);
 			if (shouldPreventDefault) {
@@ -346,7 +346,7 @@ export class WorkbenchKeybindingService extends AbstractKeybindingService {
 		});
 	}
 
-	public dumpDebugInfo(): string {
+	public _dumpDebugInfo(): string {
 		const layoutInfo = JSON.stringify(KeyboardMapperFactory.INSTANCE.getCurrentKeyboardLayout(), null, '\t');
 		const mapperInfo = this._keyboardMapper.dumpDebugInfo();
 		const rawMapping = JSON.stringify(KeyboardMapperFactory.INSTANCE.getRawKeyboardMapping(), null, '\t');
@@ -392,11 +392,11 @@ export class WorkbenchKeybindingService extends AbstractKeybindingService {
 	private _resolveKeybindingItems(items: IKeybindingItem[], isDefault: boolean): ResolvedKeybindingItem[] {
 		let result: ResolvedKeybindingItem[] = [], resultLen = 0;
 		for (const item of items) {
-			const when = (item.when ? item.when.normalize() : null);
+			const when = (item.when ? item.when.normalize() : undefined);
 			const keybinding = item.keybinding;
 			if (!keybinding) {
 				// This might be a removal keybinding item in user settings => accept it
-				result[resultLen++] = new ResolvedKeybindingItem(null, item.command, item.commandArgs, when, isDefault);
+				result[resultLen++] = new ResolvedKeybindingItem(undefined, item.command, item.commandArgs, when, isDefault);
 			} else {
 				const resolvedKeybindings = this.resolveKeybinding(keybinding);
 				for (const resolvedKeybinding of resolvedKeybindings) {
@@ -411,11 +411,11 @@ export class WorkbenchKeybindingService extends AbstractKeybindingService {
 	private _resolveUserKeybindingItems(items: IUserKeybindingItem[], isDefault: boolean): ResolvedKeybindingItem[] {
 		let result: ResolvedKeybindingItem[] = [], resultLen = 0;
 		for (const item of items) {
-			const when = (item.when ? item.when.normalize() : null);
+			const when = (item.when ? item.when.normalize() : undefined);
 			const parts = item.parts;
 			if (parts.length === 0) {
 				// This might be a removal keybinding item in user settings => accept it
-				result[resultLen++] = new ResolvedKeybindingItem(null, item.command, item.commandArgs, when, isDefault);
+				result[resultLen++] = new ResolvedKeybindingItem(undefined, item.command, item.commandArgs, when, isDefault);
 			} else {
 				const resolvedKeybindings = this._keyboardMapper.resolveUserBinding(parts);
 				for (const resolvedKeybinding of resolvedKeybindings) {
@@ -577,7 +577,7 @@ export class WorkbenchKeybindingService extends AbstractKeybindingService {
 let schemaId = 'vscode://schemas/keybindings';
 let commandsSchemas: IJSONSchema[] = [];
 let commandsEnum: string[] = [];
-let commandsEnumDescriptions: (string | null | undefined)[] = [];
+let commandsEnumDescriptions: (string | undefined)[] = [];
 let schema: IJSONSchema = {
 	'id': schemaId,
 	'type': 'array',
@@ -635,14 +635,27 @@ function updateSchema() {
 	commandsEnum.length = 0;
 	commandsEnumDescriptions.length = 0;
 
+	const knownCommands = new Set<string>();
+	const addKnownCommand = (commandId: string, description?: string | undefined) => {
+		if (!/^_/.test(commandId)) {
+			if (!knownCommands.has(commandId)) {
+				knownCommands.add(commandId);
+
+				commandsEnum.push(commandId);
+				commandsEnumDescriptions.push(description);
+
+				// Also add the negative form for keybinding removal
+				commandsEnum.push(`-${commandId}`);
+				commandsEnumDescriptions.push(description);
+			}
+		}
+	};
+
 	const allCommands = CommandsRegistry.getCommands();
 	for (let commandId in allCommands) {
 		const commandDescription = allCommands[commandId].description;
 
-		if (!/^_/.test(commandId)) {
-			commandsEnum.push(commandId);
-			commandsEnumDescriptions.push(commandDescription && commandDescription.description);
-		}
+		addKnownCommand(commandId, commandDescription ? commandDescription.description : undefined);
 
 		if (!commandDescription || !commandDescription.args || commandDescription.args.length !== 1 || !commandDescription.args[0].schema) {
 			continue;
@@ -665,6 +678,11 @@ function updateSchema() {
 		};
 
 		commandsSchemas.push(addition);
+	}
+
+	const menuCommands = MenuRegistry.getCommands();
+	for (let commandId in menuCommands) {
+		addKnownCommand(commandId);
 	}
 }
 
@@ -693,3 +711,5 @@ const keyboardConfiguration: IConfigurationNode = {
 };
 
 configurationRegistry.registerConfiguration(keyboardConfiguration);
+
+registerSingleton(IKeybindingService, WorkbenchKeybindingService);
