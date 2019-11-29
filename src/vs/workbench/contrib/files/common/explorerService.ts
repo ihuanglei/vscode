@@ -5,8 +5,8 @@
 
 import { Event, Emitter } from 'vs/base/common/event';
 import { IWorkspaceContextService } from 'vs/platform/workspace/common/workspace';
-import { IDisposable, dispose } from 'vs/base/common/lifecycle';
-import { IExplorerService, IEditableData, IFilesConfiguration, SortOrder, SortOrderConfiguration } from 'vs/workbench/contrib/files/common/files';
+import { DisposableStore } from 'vs/base/common/lifecycle';
+import { IExplorerService, IEditableData, IFilesConfiguration, SortOrder, SortOrderConfiguration, IContextProvider } from 'vs/workbench/contrib/files/common/files';
 import { ExplorerItem, ExplorerModel } from 'vs/workbench/contrib/files/common/explorerModel';
 import { URI } from 'vs/base/common/uri';
 import { FileOperationEvent, FileOperation, IFileStat, IFileService, FileChangesEvent, FILES_EXCLUDE_CONFIG, FileChangeType, IResolveFileOptions } from 'vs/platform/files/common/files';
@@ -23,24 +23,25 @@ function getFileEventsExcludes(configurationService: IConfigurationService, root
 	const scope = root ? { resource: root } : undefined;
 	const configuration = scope ? configurationService.getValue<IFilesConfiguration>(scope) : configurationService.getValue<IFilesConfiguration>();
 
-	return (configuration && configuration.files && configuration.files.exclude) || Object.create(null);
+	return configuration?.files?.exclude || Object.create(null);
 }
 
 export class ExplorerService implements IExplorerService {
-	_serviceBrand: any;
+	_serviceBrand: undefined;
 
 	private static readonly EXPLORER_FILE_CHANGES_REACT_DELAY = 500; // delay in ms to react to file changes to give our internal events a chance to react first
 
-	private _onDidChangeRoots = new Emitter<void>();
-	private _onDidChangeItem = new Emitter<{ item?: ExplorerItem, recursive: boolean }>();
-	private _onDidChangeEditable = new Emitter<ExplorerItem>();
-	private _onDidSelectResource = new Emitter<{ resource?: URI, reveal?: boolean }>();
-	private _onDidCopyItems = new Emitter<{ items: ExplorerItem[], cut: boolean, previouslyCutItems: ExplorerItem[] | undefined }>();
-	private disposables: IDisposable[] = [];
+	private readonly _onDidChangeRoots = new Emitter<void>();
+	private readonly _onDidChangeItem = new Emitter<{ item?: ExplorerItem, recursive: boolean }>();
+	private readonly _onDidChangeEditable = new Emitter<ExplorerItem>();
+	private readonly _onDidSelectResource = new Emitter<{ resource?: URI, reveal?: boolean }>();
+	private readonly _onDidCopyItems = new Emitter<{ items: ExplorerItem[], cut: boolean, previouslyCutItems: ExplorerItem[] | undefined }>();
+	private readonly disposables = new DisposableStore();
 	private editable: { stat: ExplorerItem, data: IEditableData } | undefined;
 	private _sortOrder: SortOrder;
 	private cutItems: ExplorerItem[] | undefined;
 	private fileSystemProviderSchemes = new Set<string>();
+	private contextProvider: IContextProvider | undefined;
 
 	constructor(
 		@IFileService private fileService: IFileService,
@@ -48,7 +49,7 @@ export class ExplorerService implements IExplorerService {
 		@IConfigurationService private configurationService: IConfigurationService,
 		@IWorkspaceContextService private contextService: IWorkspaceContextService,
 		@IClipboardService private clipboardService: IClipboardService,
-		@IEditorService private editorService: IEditorService
+		@IEditorService private editorService: IEditorService,
 	) {
 		this._sortOrder = this.configurationService.getValue('explorer.sortOrder');
 	}
@@ -81,6 +82,18 @@ export class ExplorerService implements IExplorerService {
 		return this._sortOrder;
 	}
 
+	registerContextProvider(contextProvider: IContextProvider): void {
+		this.contextProvider = contextProvider;
+	}
+
+	getContext(respectMultiSelection: boolean): ExplorerItem[] {
+		if (!this.contextProvider) {
+			return [];
+		}
+
+		return this.contextProvider.getContext(respectMultiSelection);
+	}
+
 	// Memoized locals
 	@memoize private get fileEventsFilter(): ResourceGlobMatcher {
 		const fileEventsFilter = this.instantiationService.createInstance(
@@ -88,26 +101,27 @@ export class ExplorerService implements IExplorerService {
 			(root?: URI) => getFileEventsExcludes(this.configurationService, root),
 			(event: IConfigurationChangeEvent) => event.affectsConfiguration(FILES_EXCLUDE_CONFIG)
 		);
-		this.disposables.push(fileEventsFilter);
+		this.disposables.add(fileEventsFilter);
 
 		return fileEventsFilter;
 	}
 
 	@memoize get model(): ExplorerModel {
 		const model = new ExplorerModel(this.contextService);
-		this.disposables.push(model);
-		this.disposables.push(this.fileService.onAfterOperation(e => this.onFileOperation(e)));
-		this.disposables.push(this.fileService.onFileChanges(e => this.onFileChanges(e)));
-		this.disposables.push(this.configurationService.onDidChangeConfiguration(e => this.onConfigurationUpdated(this.configurationService.getValue<IFilesConfiguration>())));
-		this.disposables.push(this.fileService.onDidChangeFileSystemProviderRegistrations(e => {
+		this.disposables.add(model);
+		this.disposables.add(this.fileService.onAfterOperation(e => this.onFileOperation(e)));
+		this.disposables.add(this.fileService.onFileChanges(e => this.onFileChanges(e)));
+		this.disposables.add(this.configurationService.onDidChangeConfiguration(e => this.onConfigurationUpdated(this.configurationService.getValue<IFilesConfiguration>())));
+		this.disposables.add(this.fileService.onDidChangeFileSystemProviderRegistrations(e => {
 			if (e.added && this.fileSystemProviderSchemes.has(e.scheme)) {
 				// A file system provider got re-registered, we should update all file stats since they might change (got read-only)
+				this.model.roots.forEach(r => r.forgetChildren());
 				this._onDidChangeItem.fire({ recursive: true });
 			} else {
 				this.fileSystemProviderSchemes.add(e.scheme);
 			}
 		}));
-		this.disposables.push(model.onDidChangeRoots(() => this._onDidChangeRoots.fire()));
+		this.disposables.add(model.onDidChangeRoots(() => this._onDidChangeRoots.fire()));
 
 		return model;
 	}
@@ -139,6 +153,10 @@ export class ExplorerService implements IExplorerService {
 		return !!this.cutItems && this.cutItems.indexOf(item) >= 0;
 	}
 
+	getEditable(): { stat: ExplorerItem, data: IEditableData } | undefined {
+		return this.editable;
+	}
+
 	getEditableData(stat: ExplorerItem): IEditableData | undefined {
 		return this.editable && this.editable.stat === stat ? this.editable.data : undefined;
 	}
@@ -157,14 +175,18 @@ export class ExplorerService implements IExplorerService {
 		// Stat needs to be resolved first and then revealed
 		const options: IResolveFileOptions = { resolveTo: [resource], resolveMetadata: this.sortOrder === 'modified' };
 		const workspaceFolder = this.contextService.getWorkspaceFolder(resource);
-		const rootUri = workspaceFolder ? workspaceFolder.uri : this.roots[0].resource;
+		if (workspaceFolder === null) {
+			return Promise.resolve(undefined);
+		}
+		const rootUri = workspaceFolder.uri;
+
 		const root = this.roots.filter(r => r.resource.toString() === rootUri.toString()).pop()!;
 
 		try {
 			const stat = await this.fileService.resolve(rootUri, options);
 
 			// Convert to model
-			const modelStat = ExplorerItem.create(stat, undefined, options.resolveTo);
+			const modelStat = ExplorerItem.create(this.fileService, stat, undefined, options.resolveTo);
 			// Update Input with disk Stat
 			ExplorerItem.mergeLocalWithDisk(modelStat, root);
 			const item = root.find(resource);
@@ -182,7 +204,9 @@ export class ExplorerService implements IExplorerService {
 		this.model.roots.forEach(r => r.forgetChildren());
 		this._onDidChangeItem.fire({ recursive: true });
 		const resource = this.editorService.activeEditor ? this.editorService.activeEditor.getResource() : undefined;
-		if (resource) {
+		const autoReveal = this.configurationService.getValue<IFilesConfiguration>().explorer.autoReveal;
+
+		if (resource && autoReveal) {
 			// We did a top level refresh, reveal the active file #67118
 			this.select(resource, true);
 		}
@@ -206,11 +230,11 @@ export class ExplorerService implements IExplorerService {
 					const thenable: Promise<IFileStat | undefined> = p.isDirectoryResolved ? Promise.resolve(undefined) : this.fileService.resolve(p.resource, { resolveMetadata });
 					thenable.then(stat => {
 						if (stat) {
-							const modelStat = ExplorerItem.create(stat, p.parent);
+							const modelStat = ExplorerItem.create(this.fileService, stat, p.parent);
 							ExplorerItem.mergeLocalWithDisk(modelStat, p);
 						}
 
-						const childElement = ExplorerItem.create(addedElement, p.parent);
+						const childElement = ExplorerItem.create(this.fileService, addedElement, p.parent);
 						// Make sure to remove any previous version of the file if any
 						p.removeChild(childElement);
 						p.addChild(childElement);
@@ -283,7 +307,7 @@ export class ExplorerService implements IExplorerService {
 				if (added.length) {
 
 					// Check added: Refresh if added file/folder is not part of resolved root and parent is part of it
-					const ignoredPaths: { [resource: string]: boolean } = <{ [resource: string]: boolean }>{};
+					const ignoredPaths: Set<string> = new Set();
 					for (let i = 0; i < added.length; i++) {
 						const change = added[i];
 
@@ -291,7 +315,7 @@ export class ExplorerService implements IExplorerService {
 						const parent = dirname(change.resource);
 
 						// Continue if parent was already determined as to be ignored
-						if (ignoredPaths[parent.toString()]) {
+						if (ignoredPaths.has(parent.toString())) {
 							continue;
 						}
 
@@ -303,7 +327,7 @@ export class ExplorerService implements IExplorerService {
 
 						// Keep track of path that can be ignored for faster lookup
 						if (!parentStat || !parentStat.isDirectoryResolved) {
-							ignoredPaths[parent.toString()] = true;
+							ignoredPaths.add(parent.toString());
 						}
 					}
 				}
@@ -366,7 +390,7 @@ export class ExplorerService implements IExplorerService {
 	}
 
 	private onConfigurationUpdated(configuration: IFilesConfiguration, event?: IConfigurationChangeEvent): void {
-		const configSortOrder = configuration && configuration.explorer && configuration.explorer.sortOrder || 'default';
+		const configSortOrder = configuration?.explorer?.sortOrder || 'default';
 		if (this._sortOrder !== configSortOrder) {
 			const shouldRefresh = this._sortOrder !== undefined;
 			this._sortOrder = configSortOrder;
@@ -377,6 +401,6 @@ export class ExplorerService implements IExplorerService {
 	}
 
 	dispose(): void {
-		dispose(this.disposables);
+		this.disposables.dispose();
 	}
 }

@@ -26,18 +26,18 @@ import { Disposable } from 'vs/base/common/lifecycle';
 import { IWorkbenchContribution } from 'vs/workbench/common/contributions';
 import { IWorkbenchLayoutService } from 'vs/workbench/services/layout/browser/layoutService';
 import { DelegatingEditorService } from 'vs/workbench/services/editor/browser/editorService';
-import { IEditorGroup, IEditorGroupsService } from 'vs/workbench/services/editor/common/editorGroupsService';
+import { IEditorGroupsService } from 'vs/workbench/services/editor/common/editorGroupsService';
 import { IEditorService } from 'vs/workbench/services/editor/common/editorService';
-import { IEditorOptions } from 'vs/platform/editor/common/editor';
-import { IEditorInput, IEditor } from 'vs/workbench/common/editor';
-import { ViewletPanel } from 'vs/workbench/browser/parts/views/panelViewlet';
+import { IEditor } from 'vs/workbench/common/editor';
+import { ViewletPane } from 'vs/workbench/browser/parts/views/paneViewlet';
 import { KeyChord, KeyMod, KeyCode } from 'vs/base/common/keyCodes';
 import { Registry } from 'vs/platform/registry/common/platform';
 import { IProgressService, ProgressLocation } from 'vs/platform/progress/common/progress';
+import { withUndefinedAsNull } from 'vs/base/common/types';
 
 export class ExplorerViewletViewsContribution extends Disposable implements IWorkbenchContribution {
 
-	private openEditorsVisibleContextKey: IContextKey<boolean>;
+	private openEditorsVisibleContextKey!: IContextKey<boolean>;
 
 	constructor(
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
@@ -121,7 +121,7 @@ export class ExplorerViewletViewsContribution extends Disposable implements IWor
 			name: EmptyView.NAME,
 			ctorDescriptor: { ctor: EmptyView },
 			order: 1,
-			canToggleVisibility: false
+			canToggleVisibility: true,
 		};
 	}
 
@@ -157,7 +157,6 @@ export class ExplorerViewlet extends ViewContainerViewlet {
 		@ITelemetryService telemetryService: ITelemetryService,
 		@IWorkspaceContextService protected contextService: IWorkspaceContextService,
 		@IStorageService protected storageService: IStorageService,
-		@IEditorService private readonly editorService: IEditorService,
 		@IEditorGroupsService private readonly editorGroupService: IEditorGroupsService,
 		@IConfigurationService configurationService: IConfigurationService,
 		@IInstantiationService protected instantiationService: IInstantiationService,
@@ -178,7 +177,7 @@ export class ExplorerViewlet extends ViewContainerViewlet {
 		DOM.addClass(parent, 'explorer-viewlet');
 	}
 
-	protected createView(viewDescriptor: IViewDescriptor, options: IViewletViewOptions): ViewletPanel {
+	protected createView(viewDescriptor: IViewDescriptor, options: IViewletViewOptions): ViewletPane {
 		if (viewDescriptor.id === ExplorerView.ID) {
 			// Create a delegating editor service for the explorer to be able to delay the refresh in the opened
 			// editors view above. This is a workaround for being able to double click on a file to make it pinned
@@ -186,7 +185,7 @@ export class ExplorerViewlet extends ViewContainerViewlet {
 			// We try to be smart and only use the delay if we recognize that the user action is likely to cause
 			// a new entry in the opened editors view.
 			const delegatingEditorService = this.instantiationService.createInstance(DelegatingEditorService);
-			delegatingEditorService.setEditorOpenHandler(async (group: IEditorGroup, editor: IEditorInput, options?: IEditorOptions): Promise<IEditor | null> => {
+			delegatingEditorService.setEditorOpenHandler(async (delegate, group, editor, options): Promise<IEditor | null> => {
 				let openEditorsView = this.getOpenEditorsView();
 				if (openEditorsView) {
 					let delay = 0;
@@ -202,9 +201,9 @@ export class ExplorerViewlet extends ViewContainerViewlet {
 					openEditorsView.setStructuralRefreshDelay(delay);
 				}
 
-				let openedEditor: IEditor | null = null;
+				let openedEditor: IEditor | undefined;
 				try {
-					openedEditor = await this.editorService.openEditor(editor, options, group);
+					openedEditor = await delegate(group, editor, options);
 				} catch (error) {
 					// ignore
 				} finally {
@@ -214,7 +213,7 @@ export class ExplorerViewlet extends ViewContainerViewlet {
 					}
 				}
 
-				return openedEditor;
+				return withUndefinedAsNull(openedEditor);
 			});
 
 			const explorerInstantiator = this.instantiationService.createChild(new ServiceCollection([IEditorService, delegatingEditorService]));
@@ -231,10 +230,6 @@ export class ExplorerViewlet extends ViewContainerViewlet {
 		return <OpenEditorsView>this.getView(OpenEditorsView.ID);
 	}
 
-	public getEmptyView(): EmptyView {
-		return <EmptyView>this.getView(EmptyView.ID);
-	}
-
 	public setVisible(visible: boolean): void {
 		this.viewletVisibleContextKey.set(visible);
 		super.setVisible(visible);
@@ -242,7 +237,7 @@ export class ExplorerViewlet extends ViewContainerViewlet {
 
 	focus(): void {
 		const explorerView = this.getView(ExplorerView.ID);
-		if (explorerView && explorerView.isExpanded()) {
+		if (explorerView?.isExpanded()) {
 			explorerView.focus();
 		} else {
 			super.focus();

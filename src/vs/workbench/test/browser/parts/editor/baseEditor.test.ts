@@ -115,19 +115,19 @@ suite('Workbench base editor', () => {
 	});
 
 	test('EditorDescriptor', () => {
-		let d = new EditorDescriptor(MyEditor, 'id', 'name');
+		let d = EditorDescriptor.create(MyEditor, 'id', 'name');
 		assert.strictEqual(d.getId(), 'id');
 		assert.strictEqual(d.getName(), 'name');
 	});
 
 	test('Editor Registration', function () {
-		let d1 = new EditorDescriptor(MyEditor, 'id1', 'name');
-		let d2 = new EditorDescriptor(MyOtherEditor, 'id2', 'name');
+		let d1 = EditorDescriptor.create(MyEditor, 'id1', 'name');
+		let d2 = EditorDescriptor.create(MyOtherEditor, 'id2', 'name');
 
 		let oldEditorsCnt = EditorRegistry.getEditors().length;
 		let oldInputCnt = (<any>EditorRegistry).getEditorInputs().length;
 
-		EditorRegistry.registerEditor(d1, new SyncDescriptor(MyInput));
+		EditorRegistry.registerEditor(d1, [new SyncDescriptor(MyInput)]);
 		EditorRegistry.registerEditor(d2, [new SyncDescriptor(MyInput), new SyncDescriptor(MyOtherInput)]);
 
 		assert.equal(EditorRegistry.getEditors().length, oldEditorsCnt + 2);
@@ -142,14 +142,14 @@ suite('Workbench base editor', () => {
 	});
 
 	test('Editor Lookup favors specific class over superclass (match on specific class)', function () {
-		let d1 = new EditorDescriptor(MyEditor, 'id1', 'name');
-		let d2 = new EditorDescriptor(MyOtherEditor, 'id2', 'name');
+		let d1 = EditorDescriptor.create(MyEditor, 'id1', 'name');
+		let d2 = EditorDescriptor.create(MyOtherEditor, 'id2', 'name');
 
 		let oldEditors = EditorRegistry.getEditors();
 		(<any>EditorRegistry).setEditors([]);
 
-		EditorRegistry.registerEditor(d2, new SyncDescriptor(ResourceEditorInput));
-		EditorRegistry.registerEditor(d1, new SyncDescriptor(MyResourceInput));
+		EditorRegistry.registerEditor(d2, [new SyncDescriptor(ResourceEditorInput)]);
+		EditorRegistry.registerEditor(d1, [new SyncDescriptor(MyResourceInput)]);
 
 		let inst = new TestInstantiationService();
 
@@ -163,12 +163,12 @@ suite('Workbench base editor', () => {
 	});
 
 	test('Editor Lookup favors specific class over superclass (match on super class)', function () {
-		let d1 = new EditorDescriptor(MyOtherEditor, 'id1', 'name');
+		let d1 = EditorDescriptor.create(MyOtherEditor, 'id1', 'name');
 
 		let oldEditors = EditorRegistry.getEditors();
 		(<any>EditorRegistry).setEditors([]);
 
-		EditorRegistry.registerEditor(d1, new SyncDescriptor(ResourceEditorInput));
+		EditorRegistry.registerEditor(d1, [new SyncDescriptor(ResourceEditorInput)]);
 
 		let inst = new TestInstantiationService();
 

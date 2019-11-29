@@ -8,21 +8,28 @@ import { Barrier } from 'vs/base/common/async';
 import { Disposable } from 'vs/base/common/lifecycle';
 import { NodeSocket } from 'vs/base/parts/ipc/node/ipc.net';
 import { IWorkbenchEnvironmentService } from 'vs/workbench/services/environment/common/environmentService';
-import product from 'vs/platform/product/node/product';
+import product from 'vs/platform/product/common/product';
 import { connectRemoteAgentTunnel, IConnectionOptions } from 'vs/platform/remote/common/remoteAgentConnection';
 import { IRemoteAuthorityResolverService } from 'vs/platform/remote/common/remoteAuthorityResolver';
 import { ITunnelService, RemoteTunnel } from 'vs/platform/remote/common/tunnel';
-import { nodeWebSocketFactory } from 'vs/platform/remote/node/nodeWebSocketFactory';
+import { nodeSocketFactory } from 'vs/platform/remote/node/nodeSocketFactory';
+import { ISignService } from 'vs/platform/sign/common/sign';
+import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
+import { ILogService } from 'vs/platform/log/common/log';
+import { findFreePort } from 'vs/base/node/ports';
+import { URI } from 'vs/base/common/uri';
+import { Event, Emitter } from 'vs/base/common/event';
 
-export async function createRemoteTunnel(options: IConnectionOptions, tunnelRemotePort: number): Promise<RemoteTunnel> {
-	const tunnel = new NodeRemoteTunnel(options, tunnelRemotePort);
+export async function createRemoteTunnel(options: IConnectionOptions, tunnelRemotePort: number, tunnelLocalPort?: number): Promise<RemoteTunnel> {
+	const tunnel = new NodeRemoteTunnel(options, tunnelRemotePort, tunnelLocalPort);
 	return tunnel.waitForReady();
 }
 
 class NodeRemoteTunnel extends Disposable implements RemoteTunnel {
 
 	public readonly tunnelRemotePort: number;
-	public readonly tunnelLocalPort: number;
+	public tunnelLocalPort!: number;
+	public localAddress?: URI;
 
 	private readonly _options: IConnectionOptions;
 	private readonly _server: net.Server;
@@ -31,7 +38,7 @@ class NodeRemoteTunnel extends Disposable implements RemoteTunnel {
 	private readonly _listeningListener: () => void;
 	private readonly _connectionListener: (socket: net.Socket) => void;
 
-	constructor(options: IConnectionOptions, tunnelRemotePort: number) {
+	constructor(options: IConnectionOptions, tunnelRemotePort: number, private readonly suggestedLocalPort?: number) {
 		super();
 		this._options = options;
 		this._server = net.createServer();
@@ -44,7 +51,7 @@ class NodeRemoteTunnel extends Disposable implements RemoteTunnel {
 		this._server.on('connection', this._connectionListener);
 
 		this.tunnelRemotePort = tunnelRemotePort;
-		this.tunnelLocalPort = (<net.AddressInfo>this._server.listen(0).address()).port;
+
 	}
 
 	public dispose(): void {
@@ -55,7 +62,16 @@ class NodeRemoteTunnel extends Disposable implements RemoteTunnel {
 	}
 
 	public async waitForReady(): Promise<this> {
+
+		// try to get the same port number as the remote port number...
+		const localPort = await findFreePort(this.suggestedLocalPort ?? this.tunnelRemotePort, 1, 1000);
+
+		// if that fails, the method above returns 0, which works out fine below...
+		const address = (<net.AddressInfo>this._server.listen(localPort).address());
+		this.tunnelLocalPort = address.port;
+
 		await this._barrier.wait();
+		this.localAddress = URI.from({ scheme: 'http', authority: 'localhost:' + address.port });
 		return this;
 	}
 
@@ -83,31 +99,101 @@ class NodeRemoteTunnel extends Disposable implements RemoteTunnel {
 }
 
 export class TunnelService implements ITunnelService {
-	_serviceBrand: any;
+	_serviceBrand: undefined;
+
+	private _onTunnelOpened: Emitter<RemoteTunnel> = new Emitter();
+	public onTunnelOpened: Event<RemoteTunnel> = this._onTunnelOpened.event;
+	private _onTunnelClosed: Emitter<number> = new Emitter();
+	public onTunnelClosed: Event<number> = this._onTunnelClosed.event;
+	private readonly _tunnels = new Map</* port */ number, { refcount: number, readonly value: Promise<RemoteTunnel> }>();
 
 	public constructor(
 		@IWorkbenchEnvironmentService private readonly environmentService: IWorkbenchEnvironmentService,
 		@IRemoteAuthorityResolverService private readonly remoteAuthorityResolverService: IRemoteAuthorityResolverService,
-	) {
+		@ISignService private readonly signService: ISignService,
+		@ILogService private readonly logService: ILogService,
+	) { }
+
+	public get tunnels(): Promise<readonly RemoteTunnel[]> {
+		return Promise.all(Array.from(this._tunnels.values()).map(x => x.value));
 	}
 
-	openTunnel(remotePort: number): Promise<RemoteTunnel> | undefined {
+	dispose(): void {
+		for (const { value } of this._tunnels.values()) {
+			value.then(tunnel => tunnel.dispose());
+		}
+		this._tunnels.clear();
+	}
+
+	openTunnel(remotePort: number, localPort: number): Promise<RemoteTunnel> | undefined {
 		const remoteAuthority = this.environmentService.configuration.remoteAuthority;
 		if (!remoteAuthority) {
 			return undefined;
 		}
 
-		const options: IConnectionOptions = {
-			isBuilt: this.environmentService.isBuilt,
-			commit: product.commit,
-			webSocketFactory: nodeWebSocketFactory,
-			addressProvider: {
-				getAddress: async () => {
-					const { host, port } = await this.remoteAuthorityResolverService.resolveAuthority(remoteAuthority);
-					return { host, port };
+		const resolvedTunnel = this.retainOrCreateTunnel(remoteAuthority, remotePort, localPort);
+		if (!resolvedTunnel) {
+			return resolvedTunnel;
+		}
+
+		return resolvedTunnel.then(tunnel => {
+			const newTunnel = this.makeTunnel(tunnel);
+			this._onTunnelOpened.fire(newTunnel);
+			return newTunnel;
+		});
+	}
+
+	private makeTunnel(tunnel: RemoteTunnel): RemoteTunnel {
+		return {
+			tunnelRemotePort: tunnel.tunnelRemotePort,
+			tunnelLocalPort: tunnel.tunnelLocalPort,
+			localAddress: tunnel.localAddress,
+			dispose: () => {
+				const existing = this._tunnels.get(tunnel.tunnelRemotePort);
+				if (existing) {
+					if (--existing.refcount <= 0) {
+						existing.value.then(tunnel => tunnel.dispose());
+						this._tunnels.delete(tunnel.tunnelRemotePort);
+						this._onTunnelClosed.fire(tunnel.tunnelRemotePort);
+					}
 				}
 			}
 		};
-		return createRemoteTunnel(options, remotePort);
+	}
+
+	async closeTunnel(remotePort: number): Promise<void> {
+		if (this._tunnels.has(remotePort)) {
+			const value = this._tunnels.get(remotePort)!;
+			(await value.value).dispose();
+			value.refcount = 0;
+		}
+	}
+
+	private retainOrCreateTunnel(remoteAuthority: string, remotePort: number, localPort?: number): Promise<RemoteTunnel> | undefined {
+		const existing = this._tunnels.get(remotePort);
+		if (existing) {
+			++existing.refcount;
+			return existing.value;
+		}
+
+		const options: IConnectionOptions = {
+			commit: product.commit,
+			socketFactory: nodeSocketFactory,
+			addressProvider: {
+				getAddress: async () => {
+					const { authority } = await this.remoteAuthorityResolverService.resolveAuthority(remoteAuthority);
+					return { host: authority.host, port: authority.port };
+				}
+			},
+			signService: this.signService,
+			logService: this.logService
+		};
+
+		const tunnel = createRemoteTunnel(options, remotePort, localPort);
+		// Using makeTunnel here for the value does result in dispose getting called twice, but it also ensures that _onTunnelClosed will be fired when closeTunnel is called.
+		this._tunnels.set(remotePort, { refcount: 1, value: tunnel.then(value => this.makeTunnel(value)) });
+		return tunnel;
 	}
 }
+
+registerSingleton(ITunnelService, TunnelService, true);
