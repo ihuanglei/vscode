@@ -9,7 +9,6 @@ import * as nls from 'vs/nls';
 import * as platform from 'vs/base/common/platform';
 import severity from 'vs/base/common/severity';
 import { Event, Emitter } from 'vs/base/common/event';
-import { CompletionItem, completionKindFromString } from 'vs/editor/common/modes';
 import { Position, IPosition } from 'vs/editor/common/core/position';
 import * as aria from 'vs/base/browser/ui/aria/aria';
 import { IDebugSession, IConfig, IThread, IRawModelUpdate, IDebugService, IRawStoppedDetails, State, LoadedSourceEvent, IFunctionBreakpoint, IExceptionBreakpoint, IBreakpoint, IExceptionInfo, AdapterEndEvent, IDebugger, VIEWLET_ID, IDebugConfiguration, IReplElement, IStackFrame, IExpression, IReplElementSource, IDataBreakpoint, IDebugSessionOptions } from 'vs/workbench/contrib/debug/common/debug';
@@ -20,13 +19,12 @@ import { RawDebugSession } from 'vs/workbench/contrib/debug/browser/rawDebugSess
 import { IProductService } from 'vs/platform/product/common/productService';
 import { IWorkspaceFolder, IWorkspaceContextService } from 'vs/platform/workspace/common/workspace';
 import { IDisposable, dispose } from 'vs/base/common/lifecycle';
-import { RunOnceScheduler } from 'vs/base/common/async';
+import { RunOnceScheduler, Queue } from 'vs/base/common/async';
 import { generateUuid } from 'vs/base/common/uuid';
 import { IHostService } from 'vs/workbench/services/host/browser/host';
 import { IExtensionHostDebugService } from 'vs/platform/debug/common/extensionHostDebug';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
 import { normalizeDriveLetter } from 'vs/base/common/labels';
-import { Range } from 'vs/editor/common/core/range';
 import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
 import { IViewletService } from 'vs/workbench/services/viewlet/browser/viewlet';
 import { ReplModel } from 'vs/workbench/contrib/debug/common/replModel';
@@ -34,10 +32,11 @@ import { IOpenerService } from 'vs/platform/opener/common/opener';
 import { variableSetEmitter } from 'vs/workbench/contrib/debug/browser/variablesView';
 import { CancellationTokenSource, CancellationToken } from 'vs/base/common/cancellation';
 import { distinct } from 'vs/base/common/arrays';
+import { INotificationService } from 'vs/platform/notification/common/notification';
+import { ILifecycleService } from 'vs/platform/lifecycle/common/lifecycle';
 
 export class DebugSession implements IDebugSession {
 
-	private id: string;
 	private _subId: string | undefined;
 	private raw: RawDebugSession | undefined;
 	private initialized = false;
@@ -62,6 +61,7 @@ export class DebugSession implements IDebugSession {
 	private readonly _onDidChangeName = new Emitter<string>();
 
 	constructor(
+		private id: string,
 		private _configuration: { resolved: IConfig, unresolved: IConfig | undefined },
 		public root: IWorkspaceFolder | undefined,
 		private model: DebugModel,
@@ -74,16 +74,25 @@ export class DebugSession implements IDebugSession {
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 		@IProductService private readonly productService: IProductService,
 		@IExtensionHostDebugService private readonly extensionHostDebugService: IExtensionHostDebugService,
-		@IOpenerService private readonly openerService: IOpenerService
+		@IOpenerService private readonly openerService: IOpenerService,
+		@INotificationService private readonly notificationService: INotificationService,
+		@ILifecycleService lifecycleService: ILifecycleService
 	) {
-		this.id = generateUuid();
 		this._options = options || {};
 		if (this.hasSeparateRepl()) {
 			this.repl = new ReplModel();
 		} else {
 			this.repl = (this.parentSession as DebugSession).repl;
 		}
-		this.repl.onDidChangeElements(() => this._onDidChangeREPLElements.fire());
+
+		const toDispose: IDisposable[] = [];
+		toDispose.push(this.repl.onDidChangeElements(() => this._onDidChangeREPLElements.fire()));
+		if (lifecycleService) {
+			toDispose.push(lifecycleService.onShutdown(() => {
+				this.shutdown();
+				dispose(toDispose);
+			}));
+		}
 	}
 
 	getId(): string {
@@ -190,7 +199,7 @@ export class DebugSession implements IDebugSession {
 		try {
 			const customTelemetryService = await dbgr.getCustomTelemetryService();
 			const debugAdapter = await dbgr.createDebugAdapter(this);
-			this.raw = new RawDebugSession(debugAdapter, dbgr, this.telemetryService, customTelemetryService, this.extensionHostDebugService, this.openerService);
+			this.raw = new RawDebugSession(debugAdapter, dbgr, this.telemetryService, customTelemetryService, this.extensionHostDebugService, this.openerService, this.notificationService);
 
 			await this.raw.start();
 			this.registerListeners();
@@ -213,6 +222,7 @@ export class DebugSession implements IDebugSession {
 		} catch (err) {
 			this.initialized = true;
 			this._onDidChangeState.fire();
+			this.shutdown();
 			throw err;
 		}
 	}
@@ -227,8 +237,12 @@ export class DebugSession implements IDebugSession {
 
 		// __sessionID only used for EH debugging (but we add it always for now...)
 		config.__sessionId = this.getId();
-		await this.raw.launchOrAttach(config);
-
+		try {
+			await this.raw.launchOrAttach(config);
+		} catch (err) {
+			this.shutdown();
+			throw err;
+		}
 	}
 
 	/**
@@ -565,35 +579,17 @@ export class DebugSession implements IDebugSession {
 		}
 	}
 
-	async completions(frameId: number | undefined, text: string, position: Position, overwriteBefore: number, token: CancellationToken): Promise<CompletionItem[]> {
+	async completions(frameId: number | undefined, text: string, position: Position, overwriteBefore: number, token: CancellationToken): Promise<DebugProtocol.CompletionsResponse> {
 		if (!this.raw) {
 			return Promise.reject(new Error('no debug adapter'));
 		}
 
-		const response = await this.raw.completions({
+		return this.raw.completions({
 			frameId,
 			text,
 			column: position.column,
 			line: position.lineNumber,
 		}, token);
-
-		const result: CompletionItem[] = [];
-		if (response && response.body && response.body.targets) {
-			response.body.targets.forEach(item => {
-				if (item && item.label) {
-					result.push({
-						label: item.label,
-						insertText: item.text || item.label,
-						kind: completionKindFromString(item.type || 'property'),
-						filterText: (item.start && item.length) ? text.substr(item.start, item.length).concat(item.label) : undefined,
-						range: Range.fromPositions(position.delta(0, -(item.length || overwriteBefore)), position),
-						sortText: item.sortText
-					});
-				}
-			});
-		}
-
-		return result;
 	}
 
 	//---- threads
@@ -689,6 +685,11 @@ export class DebugSession implements IDebugSession {
 				});
 			}
 		}
+	}
+
+	initializeForTest(raw: RawDebugSession): void {
+		this.raw = raw;
+		this.registerListeners();
 	}
 
 	//---- private
@@ -805,48 +806,58 @@ export class DebugSession implements IDebugSession {
 			this._onDidChangeState.fire();
 		}));
 
-		let outpuPromises: Promise<void>[] = [];
+		const outputQueue = new Queue<void>();
 		this.rawListeners.push(this.raw.onDidOutput(async event => {
-			if (!event.body || !this.raw) {
-				return;
-			}
-
-			const outputSeverity = event.body.category === 'stderr' ? severity.Error : event.body.category === 'console' ? severity.Warning : severity.Info;
-			if (event.body.category === 'telemetry') {
-				// only log telemetry events from debug adapter if the debug extension provided the telemetry key
-				// and the user opted in telemetry
-				if (this.raw.customTelemetryService && this.telemetryService.isOptedIn) {
-					// __GDPR__TODO__ We're sending events in the name of the debug extension and we can not ensure that those are declared correctly.
-					this.raw.customTelemetryService.publicLog(event.body.output, event.body.data);
+			outputQueue.queue(async () => {
+				if (!event.body || !this.raw) {
+					return;
 				}
 
-				return;
-			}
+				const outputSeverity = event.body.category === 'stderr' ? severity.Error : event.body.category === 'console' ? severity.Warning : severity.Info;
+				if (event.body.category === 'telemetry') {
+					// only log telemetry events from debug adapter if the debug extension provided the telemetry key
+					// and the user opted in telemetry
+					if (this.raw.customTelemetryService && this.telemetryService.isOptedIn) {
+						// __GDPR__TODO__ We're sending events in the name of the debug extension and we can not ensure that those are declared correctly.
+						this.raw.customTelemetryService.publicLog(event.body.output, event.body.data);
+					}
 
-			// Make sure to append output in the correct order by properly waiting on preivous promises #33822
-			const waitFor = outpuPromises.slice();
-			const source = event.body.source && event.body.line ? {
-				lineNumber: event.body.line,
-				column: event.body.column ? event.body.column : 1,
-				source: this.getSource(event.body.source)
-			} : undefined;
-			if (event.body.variablesReference) {
-				const container = new ExpressionContainer(this, undefined, event.body.variablesReference, generateUuid());
-				outpuPromises.push(container.getChildren().then(async children => {
-					await Promise.all(waitFor);
-					children.forEach(child => {
-						// Since we can not display multiple trees in a row, we are displaying these variables one after the other (ignoring their names)
-						(<any>child).name = null;
-						this.appendToRepl(child, outputSeverity, source);
+					return;
+				}
+
+				// Make sure to append output in the correct order by properly waiting on preivous promises #33822
+				const source = event.body.source && event.body.line ? {
+					lineNumber: event.body.line,
+					column: event.body.column ? event.body.column : 1,
+					source: this.getSource(event.body.source)
+				} : undefined;
+
+				if (event.body.group === 'start' || event.body.group === 'startCollapsed') {
+					const expanded = event.body.group === 'start';
+					this.repl.startGroup(event.body.output || '', expanded, source);
+					return;
+				}
+				if (event.body.group === 'end') {
+					this.repl.endGroup();
+					if (!event.body.output) {
+						// Only return if the end event does not have additional output in it
+						return;
+					}
+				}
+
+				if (event.body.variablesReference) {
+					const container = new ExpressionContainer(this, undefined, event.body.variablesReference, generateUuid());
+					await container.getChildren().then(children => {
+						children.forEach(child => {
+							// Since we can not display multiple trees in a row, we are displaying these variables one after the other (ignoring their names)
+							(<any>child).name = null;
+							this.appendToRepl(child, outputSeverity, source);
+						});
 					});
-				}));
-			} else if (typeof event.body.output === 'string') {
-				await Promise.all(waitFor);
-				this.appendToRepl(event.body.output, outputSeverity, source);
-			}
-
-			await Promise.all(outpuPromises);
-			outpuPromises = [];
+				} else if (typeof event.body.output === 'string') {
+					this.appendToRepl(event.body.output, outputSeverity, source);
+				}
+			});
 		}));
 
 		this.rawListeners.push(this.raw.onDidBreakpoint(event => {
@@ -905,17 +916,20 @@ export class DebugSession implements IDebugSession {
 		this.rawListeners.push(this.raw.onDidExitAdapter(event => {
 			this.initialized = true;
 			this.model.setBreakpointSessionData(this.getId(), this.capabilities, undefined);
+			this.shutdown();
 			this._onDidEndAdapter.fire(event);
 		}));
 	}
 
-	shutdown(): void {
+	// Disconnects and clears state. Session can be initialized again for a new connection.
+	private shutdown(): void {
 		dispose(this.rawListeners);
 		if (this.raw) {
 			this.raw.disconnect();
 			this.raw.dispose();
+			this.raw = undefined;
 		}
-		this.raw = undefined;
+		this.fetchThreadsScheduler = undefined;
 		this.model.clearThreads(this.getId(), true);
 		this._onDidChangeState.fire();
 	}

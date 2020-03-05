@@ -702,6 +702,9 @@ export interface IAccessibilityProvider<T> {
 	 * https://www.w3.org/TR/wai-aria/#aria-level
 	 */
 	getAriaLevel?(element: T): number | undefined;
+
+	onDidChangeActiveDescendant?: Event<void>;
+	getActiveDescendantId?(element: T): string | undefined;
 }
 
 export class DefaultStyleController implements IStyleController {
@@ -844,6 +847,7 @@ export interface IListOptions<T> {
 	readonly useShadows?: boolean;
 	readonly verticalScrollMode?: ScrollbarVisibility;
 	readonly setRowLineHeight?: boolean;
+	readonly setRowHeight?: boolean;
 	readonly supportDynamicHeights?: boolean;
 	readonly mouseSupport?: boolean;
 	readonly horizontalScrolling?: boolean;
@@ -1111,18 +1115,19 @@ export class List<T> implements ISpliceable<T>, IDisposable {
 	private focus: Trait<T>;
 	private selection: Trait<T>;
 	private eventBufferer = new EventBufferer();
-	private view: ListView<T>;
+	protected view: ListView<T>;
 	private spliceable: ISpliceable<T>;
 	private styleController: IStyleController;
 	private typeLabelController?: TypeLabelController<T>;
+	private accessibilityProvider?: IAccessibilityProvider<T>;
 
 	protected readonly disposables = new DisposableStore();
 
-	@memoize get onFocusChange(): Event<IListEvent<T>> {
+	@memoize get onDidChangeFocus(): Event<IListEvent<T>> {
 		return Event.map(this.eventBufferer.wrapEvent(this.focus.onChange), e => this.toListEvent(e));
 	}
 
-	@memoize get onSelectionChange(): Event<IListEvent<T>> {
+	@memoize get onDidChangeSelection(): Event<IListEvent<T>> {
 		return Event.map(this.eventBufferer.wrapEvent(this.selection.onChange), e => this.toListEvent(e));
 	}
 
@@ -1200,8 +1205,14 @@ export class List<T> implements ISpliceable<T>, IDisposable {
 
 		const baseRenderers: IListRenderer<T, ITraitTemplateData>[] = [this.focus.renderer, this.selection.renderer];
 
-		if (_options.accessibilityProvider) {
-			baseRenderers.push(new AccessibiltyRenderer<T>(_options.accessibilityProvider));
+		this.accessibilityProvider = _options.accessibilityProvider;
+
+		if (this.accessibilityProvider) {
+			baseRenderers.push(new AccessibiltyRenderer<T>(this.accessibilityProvider));
+
+			if (this.accessibilityProvider.onDidChangeActiveDescendant) {
+				this.accessibilityProvider.onDidChangeActiveDescendant(this.onDidChangeActiveDescendant, this, this.disposables);
+			}
 		}
 
 		renderers = renderers.map(r => new PipelineRenderer(r.templateId, [...baseRenderers, r]));
@@ -1255,8 +1266,8 @@ export class List<T> implements ISpliceable<T>, IDisposable {
 
 		this.disposables.add(this.createMouseController(_options));
 
-		this.onFocusChange(this._onFocusChange, this, this.disposables);
-		this.onSelectionChange(this._onSelectionChange, this, this.disposables);
+		this.onDidChangeFocus(this._onFocusChange, this, this.disposables);
+		this.onDidChangeSelection(this._onSelectionChange, this, this.disposables);
 
 		if (_options.ariaLabel) {
 			this.view.domNode.setAttribute('aria-label', localize('aria list', "{0}. Use the navigation keys to navigate.", _options.ariaLabel));
@@ -1297,6 +1308,10 @@ export class List<T> implements ISpliceable<T>, IDisposable {
 
 	updateWidth(index: number): void {
 		this.view.updateWidth(index);
+	}
+
+	updateElementHeight(index: number, size: number): void {
+		this.view.updateElementHeight(index, size);
 	}
 
 	rerender(): void {
@@ -1623,14 +1638,24 @@ export class List<T> implements ISpliceable<T>, IDisposable {
 
 	private _onFocusChange(): void {
 		const focus = this.focus.get();
+		DOM.toggleClass(this.view.domNode, 'element-focused', focus.length > 0);
+		this.onDidChangeActiveDescendant();
+	}
+
+	private onDidChangeActiveDescendant(): void {
+		const focus = this.focus.get();
 
 		if (focus.length > 0) {
-			this.view.domNode.setAttribute('aria-activedescendant', this.view.getElementDomId(focus[0]));
+			let id: string | undefined;
+
+			if (this.accessibilityProvider?.getActiveDescendantId) {
+				id = this.accessibilityProvider.getActiveDescendantId(this.view.element(focus[0]));
+			}
+
+			this.view.domNode.setAttribute('aria-activedescendant', id || this.view.getElementDomId(focus[0]));
 		} else {
 			this.view.domNode.removeAttribute('aria-activedescendant');
 		}
-
-		DOM.toggleClass(this.view.domNode, 'element-focused', focus.length > 0);
 	}
 
 	private _onSelectionChange(): void {

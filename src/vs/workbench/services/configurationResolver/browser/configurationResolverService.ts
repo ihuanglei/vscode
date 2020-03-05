@@ -62,10 +62,10 @@ export abstract class BaseConfigurationResolverService extends AbstractVariableR
 				return path.normalize(fileResource.fsPath);
 			},
 			getSelectedText: (): string | undefined => {
-				const activeTextEditorWidget = editorService.activeTextEditorWidget;
-				if (isCodeEditor(activeTextEditorWidget)) {
-					const editorModel = activeTextEditorWidget.getModel();
-					const editorSelection = activeTextEditorWidget.getSelection();
+				const activeTextEditorControl = editorService.activeTextEditorControl;
+				if (isCodeEditor(activeTextEditorControl)) {
+					const editorModel = activeTextEditorControl.getModel();
+					const editorSelection = activeTextEditorControl.getSelection();
 					if (editorModel && editorSelection) {
 						return editorModel.getValueInRange(editorSelection);
 					}
@@ -73,9 +73,9 @@ export abstract class BaseConfigurationResolverService extends AbstractVariableR
 				return undefined;
 			},
 			getLineNumber: (): string | undefined => {
-				const activeTextEditorWidget = editorService.activeTextEditorWidget;
-				if (isCodeEditor(activeTextEditorWidget)) {
-					const selection = activeTextEditorWidget.getSelection();
+				const activeTextEditorControl = editorService.activeTextEditorControl;
+				if (isCodeEditor(activeTextEditorControl)) {
+					const selection = activeTextEditorControl.getSelection();
 					if (selection) {
 						const lineNumber = selection.positionLineNumber;
 						return String(lineNumber);
@@ -259,6 +259,9 @@ export abstract class BaseConfigurationResolverService extends AbstractVariableR
 					if (info.default) {
 						inputOptions.value = info.default;
 					}
+					if (info.password) {
+						inputOptions.password = info.password;
+					}
 					return this.quickInputService.input(inputOptions).then(resolvedInput => {
 						return resolvedInput;
 					});
@@ -268,22 +271,42 @@ export abstract class BaseConfigurationResolverService extends AbstractVariableR
 					if (!Types.isString(info.description)) {
 						missingAttribute('description');
 					}
-					if (!Types.isStringArray(info.options)) {
+					if (Types.isArray(info.options)) {
+						info.options.forEach(pickOption => {
+							if (!Types.isString(pickOption) && !Types.isString(pickOption.value)) {
+								missingAttribute('value');
+							}
+						});
+					} else {
 						missingAttribute('options');
 					}
-					const picks = new Array<IQuickPickItem>();
+					interface PickStringItem extends IQuickPickItem {
+						value: string;
+					}
+					const picks = new Array<PickStringItem>();
 					info.options.forEach(pickOption => {
-						const item: IQuickPickItem = { label: pickOption };
-						if (pickOption === info.default) {
-							item.description = nls.localize('inputVariable.defaultInputValue', "Default");
+						const value = Types.isString(pickOption) ? pickOption : pickOption.value;
+						const label = Types.isString(pickOption) ? undefined : pickOption.label;
+
+						// If there is no label defined, use value as label
+						const item: PickStringItem = {
+							label: label ? `${label}: ${value}` : value,
+							value: value
+						};
+
+						if (value === info.default) {
+							item.description = nls.localize('inputVariable.defaultInputValue', "(Default)");
 							picks.unshift(item);
 						} else {
 							picks.push(item);
 						}
 					});
-					const pickOptions: IPickOptions<IQuickPickItem> = { placeHolder: info.description };
+					const pickOptions: IPickOptions<PickStringItem> = { placeHolder: info.description, matchOnDetail: true };
 					return this.quickInputService.pick(picks, pickOptions, undefined).then(resolvedInput => {
-						return resolvedInput ? resolvedInput.label : undefined;
+						if (resolvedInput) {
+							return resolvedInput.value;
+						}
+						return undefined;
 					});
 				}
 
@@ -317,7 +340,7 @@ export class ConfigurationResolverService extends BaseConfigurationResolverServi
 		@IWorkspaceContextService workspaceContextService: IWorkspaceContextService,
 		@IQuickInputService quickInputService: IQuickInputService
 	) {
-		super(environmentService.configuration.userEnv, editorService, environmentService, configurationService, commandService, workspaceContextService, quickInputService);
+		super(Object.create(null), editorService, environmentService, configurationService, commandService, workspaceContextService, quickInputService);
 	}
 }
 

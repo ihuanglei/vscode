@@ -6,7 +6,6 @@
 import 'vs/css!./inputBox';
 
 import * as nls from 'vs/nls';
-import * as Bal from 'vs/base/browser/browser';
 import * as dom from 'vs/base/browser/dom';
 import { MarkdownRenderOptions } from 'vs/base/browser/markdownRenderer';
 import { renderFormattedText, renderText } from 'vs/base/browser/formattedTextRenderer';
@@ -211,14 +210,6 @@ export class InputBox extends Widget {
 		this.oninput(this.input, () => this.onValueChange());
 		this.onblur(this.input, () => this.onBlur());
 		this.onfocus(this.input, () => this.onFocus());
-
-		// Add placeholder shim for IE because IE decides to hide the placeholder on focus (we dont want that!)
-		if (this.placeholder && Bal.isIE) {
-			this.onclick(this.input, (e) => {
-				dom.EventHelper.stop(e, true);
-				this.input.focus();
-			});
-		}
 
 		this.ignoreGesture(this.input);
 
@@ -477,7 +468,7 @@ export class InputBox extends Widget {
 
 				const styles = this.stylesForType(this.message.type);
 				spanElement.style.backgroundColor = styles.background ? styles.background.toString() : '';
-				spanElement.style.color = styles.foreground ? styles.foreground.toString() : null;
+				spanElement.style.color = styles.foreground ? styles.foreground.toString() : '';
 				spanElement.style.border = styles.border ? `1px solid ${styles.border}` : '';
 
 				dom.append(div, spanElement);

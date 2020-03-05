@@ -19,8 +19,8 @@ import { IEditorService } from 'vs/workbench/services/editor/common/editorServic
 import { IExtensionService } from 'vs/workbench/services/extensions/common/extensions';
 import { deserializeSearchError, FileMatch, ICachedSearchStats, IFileMatch, IFileQuery, IFileSearchStats, IFolderQuery, IProgressMessage, ISearchComplete, ISearchEngineStats, ISearchProgressItem, ISearchQuery, ISearchResultProvider, ISearchService, ITextQuery, pathIncludedInQuery, QueryType, SearchError, SearchErrorCode, SearchProviderType, isFileMatch, isProgressMessage } from 'vs/workbench/services/search/common/search';
 import { addContextToEditorMatches, editorMatchesToTextSearchResults } from 'vs/workbench/services/search/common/searchHelpers';
-import { IUntitledTextEditorService } from 'vs/workbench/services/untitled/common/untitledTextEditorService';
 import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
+import { DeferredPromise } from 'vs/base/test/common/utils';
 
 export class SearchService extends Disposable implements ISearchService {
 
@@ -30,9 +30,11 @@ export class SearchService extends Disposable implements ISearchService {
 	private readonly fileSearchProviders = new Map<string, ISearchResultProvider>();
 	private readonly textSearchProviders = new Map<string, ISearchResultProvider>();
 
+	private deferredFileSearchesByScheme = new Map<string, DeferredPromise<ISearchResultProvider>>();
+	private deferredTextSearchesByScheme = new Map<string, DeferredPromise<ISearchResultProvider>>();
+
 	constructor(
 		private readonly modelService: IModelService,
-		private readonly untitledTextEditorService: IUntitledTextEditorService,
 		private readonly editorService: IEditorService,
 		private readonly telemetryService: ITelemetryService,
 		private readonly logService: ILogService,
@@ -44,22 +46,30 @@ export class SearchService extends Disposable implements ISearchService {
 
 	registerSearchResultProvider(scheme: string, type: SearchProviderType, provider: ISearchResultProvider): IDisposable {
 		let list: Map<string, ISearchResultProvider>;
+		let deferredMap: Map<string, DeferredPromise<ISearchResultProvider>>;
 		if (type === SearchProviderType.file) {
 			list = this.fileSearchProviders;
+			deferredMap = this.deferredFileSearchesByScheme;
 		} else if (type === SearchProviderType.text) {
 			list = this.textSearchProviders;
+			deferredMap = this.deferredTextSearchesByScheme;
 		} else {
 			throw new Error('Unknown SearchProviderType');
 		}
 
 		list.set(scheme, provider);
 
+		if (deferredMap.has(scheme)) {
+			deferredMap.get(scheme)!.complete(provider);
+			deferredMap.delete(scheme);
+		}
+
 		return toDisposable(() => {
 			list.delete(scheme);
 		});
 	}
 
-	textSearch(query: ITextQuery, token?: CancellationToken, onProgress?: (item: ISearchProgressItem) => void): Promise<ISearchComplete> {
+	async textSearch(query: ITextQuery, token?: CancellationToken, onProgress?: (item: ISearchProgressItem) => void): Promise<ISearchComplete> {
 		// Get local results from dirty/untitled
 		const localResults = this.getLocalResults(query);
 
@@ -83,7 +93,11 @@ export class SearchService extends Disposable implements ISearchService {
 			}
 		};
 
-		return this.doSearch(query, token, onProviderProgress);
+		const otherResults = await this.doSearch(query, token, onProviderProgress);
+		return {
+			...otherResults,
+			results: [...otherResults.results, ...arrays.coalesce(localResults.values())]
+		};
 	}
 
 	fileSearch(query: IFileQuery, token?: CancellationToken): Promise<ISearchComplete> {
@@ -159,24 +173,41 @@ export class SearchService extends Disposable implements ISearchService {
 		return schemes;
 	}
 
-	private searchWithProviders(query: ISearchQuery, onProviderProgress: (progress: ISearchProgressItem) => void, token?: CancellationToken) {
+	private async waitForProvider(queryType: QueryType, scheme: string): Promise<ISearchResultProvider> {
+		let deferredMap: Map<string, DeferredPromise<ISearchResultProvider>> = queryType === QueryType.File ?
+			this.deferredFileSearchesByScheme :
+			this.deferredTextSearchesByScheme;
+
+		if (deferredMap.has(scheme)) {
+			return deferredMap.get(scheme)!.p;
+		} else {
+			const deferred = new DeferredPromise<ISearchResultProvider>();
+			deferredMap.set(scheme, deferred);
+			return deferred.p;
+		}
+	}
+
+	private async searchWithProviders(query: ISearchQuery, onProviderProgress: (progress: ISearchProgressItem) => void, token?: CancellationToken) {
 		const e2eSW = StopWatch.create(false);
 
 		const diskSearchQueries: IFolderQuery[] = [];
 		const searchPs: Promise<ISearchComplete>[] = [];
 
 		const fqs = this.groupFolderQueriesByScheme(query);
-		keys(fqs).forEach(scheme => {
+		await Promise.all(keys(fqs).map(async scheme => {
 			const schemeFQs = fqs.get(scheme)!;
-			const provider = query.type === QueryType.File ?
+			let provider = query.type === QueryType.File ?
 				this.fileSearchProviders.get(scheme) :
 				this.textSearchProviders.get(scheme);
 
 			if (!provider && scheme === 'file') {
 				diskSearchQueries.push(...schemeFQs);
-			} else if (!provider) {
-				console.warn('No search provider registered for scheme: ' + scheme);
 			} else {
+				if (!provider) {
+					console.warn(`No search provider registered for scheme: ${scheme}, waiting`);
+					provider = await this.waitForProvider(query.type, scheme);
+				}
+
 				const oneSchemeQuery: ISearchQuery = {
 					...query,
 					...{
@@ -188,7 +219,7 @@ export class SearchService extends Disposable implements ISearchService {
 					provider.fileSearch(<IFileQuery>oneSchemeQuery, token) :
 					provider.textSearch(<ITextQuery>oneSchemeQuery, onProviderProgress, token));
 			}
-		});
+		}));
 
 		const diskSearchExtraFileResources = query.extraFileResources && query.extraFileResources.filter(res => res.scheme === Schemas.file);
 
@@ -387,6 +418,7 @@ export class SearchService extends Disposable implements ISearchService {
 					return;
 				}
 
+				// Skip files that are not opened as text file
 				if (!this.editorService.isOpen({ resource })) {
 					return;
 				}
@@ -397,15 +429,13 @@ export class SearchService extends Disposable implements ISearchService {
 					return;
 				}
 
-				// Support untitled files
-				if (resource.scheme === Schemas.untitled) {
-					if (!this.untitledTextEditorService.exists(resource)) {
-						return;
-					}
+				// Block walkthrough, webview, etc.
+				if (resource.scheme !== Schemas.untitled && !this.fileService.canHandleResource(resource)) {
+					return;
 				}
 
-				// Block walkthrough, webview, etc.
-				else if (!this.fileService.canHandleResource(resource)) {
+				// Exclude files from the git FileSystemProvider, e.g. to prevent open staged files from showing in search results
+				if (resource.scheme === 'git') {
 					return;
 				}
 
@@ -448,14 +478,13 @@ export class SearchService extends Disposable implements ISearchService {
 export class RemoteSearchService extends SearchService {
 	constructor(
 		@IModelService modelService: IModelService,
-		@IUntitledTextEditorService untitledTextEditorService: IUntitledTextEditorService,
 		@IEditorService editorService: IEditorService,
 		@ITelemetryService telemetryService: ITelemetryService,
 		@ILogService logService: ILogService,
 		@IExtensionService extensionService: IExtensionService,
 		@IFileService fileService: IFileService
 	) {
-		super(modelService, untitledTextEditorService, editorService, telemetryService, logService, extensionService, fileService);
+		super(modelService, editorService, telemetryService, logService, extensionService, fileService);
 	}
 }
 
