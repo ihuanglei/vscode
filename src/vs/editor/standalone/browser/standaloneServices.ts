@@ -32,7 +32,7 @@ import { ServiceCollection } from 'vs/platform/instantiation/common/serviceColle
 import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
 import { ILabelService } from 'vs/platform/label/common/label';
 import { IListService, ListService } from 'vs/platform/list/browser/listService';
-import { ILogService, NullLogService } from 'vs/platform/log/common/log';
+import { ConsoleLogService, ILogService } from 'vs/platform/log/common/log';
 import { MarkerService } from 'vs/platform/markers/common/markerService';
 import { IMarkerService } from 'vs/platform/markers/common/markers';
 import { INotificationService } from 'vs/platform/notification/common/notification';
@@ -52,8 +52,9 @@ import { IClipboardService } from 'vs/platform/clipboard/common/clipboardService
 import { BrowserClipboardService } from 'vs/platform/clipboard/browser/clipboardService';
 import { IUndoRedoService } from 'vs/platform/undoRedo/common/undoRedo';
 import { UndoRedoService } from 'vs/platform/undoRedo/common/undoRedoService';
-import { QuickInputService } from 'vs/platform/quickinput/browser/quickInput';
+import { StandaloneQuickInputServiceImpl } from 'vs/editor/standalone/browser/quickInput/standaloneQuickInputServiceImpl';
 import { IQuickInputService } from 'vs/platform/quickinput/common/quickInput';
+import { IStorageKeysSyncRegistryService, StorageKeysSyncRegistryService } from 'vs/platform/userDataSync/common/storageKeys';
 
 export interface IEditorOverrideServices {
 	[index: string]: any;
@@ -152,7 +153,7 @@ export module StaticServices {
 
 	export const standaloneThemeService = define(IStandaloneThemeService, () => new StandaloneThemeServiceImpl());
 
-	export const logService = define(ILogService, () => new NullLogService());
+	export const logService = define(ILogService, () => new ConsoleLogService());
 
 	export const undoRedoService = define(IUndoRedoService, (o) => new UndoRedoService(dialogService.get(o), notificationService.get(o)));
 
@@ -165,6 +166,8 @@ export module StaticServices {
 	export const editorProgressService = define(IEditorProgressService, () => new SimpleEditorProgressService());
 
 	export const storageService = define(IStorageService, () => new InMemoryStorageService());
+
+	export const storageSyncService = define(IStorageKeysSyncRegistryService, () => new StorageKeysSyncRegistryService());
 
 	export const editorWorkerService = define(IEditorWorkerService, (o) => new EditorWorkerServiceImpl(modelService.get(o), resourceConfigurationService.get(o), logService.get(o)));
 }
@@ -185,6 +188,7 @@ export class DynamicStandaloneServices extends Disposable {
 		const notificationService = this.get(INotificationService);
 		const telemetryService = this.get(ITelemetryService);
 		const themeService = this.get(IThemeService);
+		const logService = this.get(ILogService);
 
 		let ensure = <T>(serviceId: ServiceIdentifier<T>, factory: () => T): T => {
 			let value: T | null = null;
@@ -200,17 +204,17 @@ export class DynamicStandaloneServices extends Disposable {
 
 		let contextKeyService = ensure(IContextKeyService, () => this._register(new ContextKeyService(configurationService)));
 
-		let accessibilityService = ensure(IAccessibilityService, () => new AccessibilityService(contextKeyService, configurationService));
+		ensure(IAccessibilityService, () => new AccessibilityService(contextKeyService, configurationService));
 
 		ensure(IListService, () => new ListService(themeService));
 
 		let commandService = ensure(ICommandService, () => new StandaloneCommandService(this._instantiationService));
 
-		let keybindingService = ensure(IKeybindingService, () => this._register(new StandaloneKeybindingService(contextKeyService, commandService, telemetryService, notificationService, domElement)));
+		let keybindingService = ensure(IKeybindingService, () => this._register(new StandaloneKeybindingService(contextKeyService, commandService, telemetryService, notificationService, logService, domElement)));
 
 		let layoutService = ensure(ILayoutService, () => new SimpleLayoutService(StaticServices.codeEditorService.get(ICodeEditorService), domElement));
 
-		ensure(IQuickInputService, () => new QuickInputService(Object.create(null), configurationService, _instantiationService, keybindingService, contextKeyService, themeService, accessibilityService, layoutService));
+		ensure(IQuickInputService, () => new StandaloneQuickInputServiceImpl(_instantiationService, StaticServices.codeEditorService.get(ICodeEditorService)));
 
 		let contextViewService = ensure(IContextViewService, () => this._register(new ContextViewService(layoutService)));
 

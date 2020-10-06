@@ -7,7 +7,7 @@ import * as arrays from 'vs/base/common/arrays';
 import { CancellationToken } from 'vs/base/common/cancellation';
 import { canceled } from 'vs/base/common/errors';
 import { Disposable, IDisposable, toDisposable } from 'vs/base/common/lifecycle';
-import { keys, ResourceMap, values } from 'vs/base/common/map';
+import { ResourceMap } from 'vs/base/common/map';
 import { Schemas } from 'vs/base/common/network';
 import { StopWatch } from 'vs/base/common/stopwatch';
 import { URI as uri } from 'vs/base/common/uri';
@@ -24,7 +24,7 @@ import { DeferredPromise } from 'vs/base/test/common/utils';
 
 export class SearchService extends Disposable implements ISearchService {
 
-	_serviceBrand: undefined;
+	declare readonly _serviceBrand: undefined;
 
 	protected diskSearch: ISearchResultProvider | null = null;
 	private readonly fileSearchProviders = new Map<string, ISearchResultProvider>();
@@ -74,13 +74,13 @@ export class SearchService extends Disposable implements ISearchService {
 		const localResults = this.getLocalResults(query);
 
 		if (onProgress) {
-			arrays.coalesce(localResults.values()).forEach(onProgress);
+			arrays.coalesce([...localResults.results.values()]).forEach(onProgress);
 		}
 
 		const onProviderProgress = (progress: ISearchProgressItem) => {
 			if (isFileMatch(progress)) {
 				// Match
-				if (!localResults.has(progress.resource) && onProgress) { // don't override local results
+				if (!localResults.results.has(progress.resource) && onProgress) { // don't override local results
 					onProgress(progress);
 				}
 			} else if (onProgress) {
@@ -96,7 +96,10 @@ export class SearchService extends Disposable implements ISearchService {
 		const otherResults = await this.doSearch(query, token, onProviderProgress);
 		return {
 			...otherResults,
-			results: [...otherResults.results, ...arrays.coalesce(localResults.values())]
+			...{
+				limitHit: otherResults.limitHit || localResults.limitHit
+			},
+			results: [...otherResults.results, ...arrays.coalesce([...localResults.results.values()])]
 		};
 	}
 
@@ -113,41 +116,43 @@ export class SearchService extends Disposable implements ISearchService {
 		schemesInQuery.forEach(scheme => providerActivations.push(this.extensionService.activateByEvent(`onSearch:${scheme}`)));
 		providerActivations.push(this.extensionService.activateByEvent('onSearch:file'));
 
-		const providerPromise = Promise.all(providerActivations)
-			.then(() => this.extensionService.whenInstalledExtensionsRegistered())
-			.then(() => {
-				// Cancel faster if search was canceled while waiting for extensions
+		const providerPromise = (async () => {
+			await Promise.all(providerActivations);
+			this.extensionService.whenInstalledExtensionsRegistered();
+
+			// Cancel faster if search was canceled while waiting for extensions
+			if (token && token.isCancellationRequested) {
+				return Promise.reject(canceled());
+			}
+
+			const progressCallback = (item: ISearchProgressItem) => {
 				if (token && token.isCancellationRequested) {
-					return Promise.reject(canceled());
+					return;
 				}
 
-				const progressCallback = (item: ISearchProgressItem) => {
-					if (token && token.isCancellationRequested) {
-						return;
-					}
-
-					if (onProgress) {
-						onProgress(item);
-					}
-				};
-
-				return this.searchWithProviders(query, progressCallback, token);
-			})
-			.then(completes => {
-				completes = arrays.coalesce(completes);
-				if (!completes.length) {
-					return {
-						limitHit: false,
-						results: []
-					};
+				if (onProgress) {
+					onProgress(item);
 				}
+			};
 
-				return <ISearchComplete>{
-					limitHit: completes[0] && completes[0].limitHit,
-					stats: completes[0].stats,
-					results: arrays.flatten(completes.map((c: ISearchComplete) => c.results))
+			const exists = await Promise.all(query.folderQueries.map(query => this.fileService.exists(query.folder)));
+			query.folderQueries = query.folderQueries.filter((_, i) => exists[i]);
+
+			let completes = await this.searchWithProviders(query, progressCallback, token);
+			completes = arrays.coalesce(completes);
+			if (!completes.length) {
+				return {
+					limitHit: false,
+					results: []
 				};
-			});
+			}
+
+			return <ISearchComplete>{
+				limitHit: completes[0] && completes[0].limitHit,
+				stats: completes[0].stats,
+				results: arrays.flatten(completes.map((c: ISearchComplete) => c.results))
+			};
+		})();
 
 		return new Promise((resolve, reject) => {
 			if (token) {
@@ -174,7 +179,7 @@ export class SearchService extends Disposable implements ISearchService {
 	}
 
 	private async waitForProvider(queryType: QueryType, scheme: string): Promise<ISearchResultProvider> {
-		let deferredMap: Map<string, DeferredPromise<ISearchResultProvider>> = queryType === QueryType.File ?
+		const deferredMap: Map<string, DeferredPromise<ISearchResultProvider>> = queryType === QueryType.File ?
 			this.deferredFileSearchesByScheme :
 			this.deferredTextSearchesByScheme;
 
@@ -194,16 +199,21 @@ export class SearchService extends Disposable implements ISearchService {
 		const searchPs: Promise<ISearchComplete>[] = [];
 
 		const fqs = this.groupFolderQueriesByScheme(query);
-		await Promise.all(keys(fqs).map(async scheme => {
+		await Promise.all([...fqs.keys()].map(async scheme => {
 			const schemeFQs = fqs.get(scheme)!;
 			let provider = query.type === QueryType.File ?
 				this.fileSearchProviders.get(scheme) :
 				this.textSearchProviders.get(scheme);
 
-			if (!provider && scheme === 'file') {
+			if (!provider && scheme === Schemas.file) {
 				diskSearchQueries.push(...schemeFQs);
 			} else {
 				if (!provider) {
+					if (scheme !== Schemas.vscodeRemote) {
+						console.warn(`No search provider registered for scheme: ${scheme}`);
+						return;
+					}
+
 					console.warn(`No search provider registered for scheme: ${scheme}, waiting`);
 					provider = await this.waitForProvider(query.type, scheme);
 				}
@@ -250,7 +260,8 @@ export class SearchService extends Disposable implements ISearchService {
 		}, err => {
 			const endToEndTime = e2eSW.elapsed();
 			this.logService.trace(`SearchService#search: ${endToEndTime}ms`);
-			const searchError = deserializeSearchError(err.message);
+			const searchError = deserializeSearchError(err);
+			this.logService.trace(`SearchService#searchError: ${searchError.message}`);
 			this.sendTelemetry(query, endToEndTime, undefined, searchError);
 
 			throw searchError;
@@ -271,9 +282,9 @@ export class SearchService extends Disposable implements ISearchService {
 	}
 
 	private sendTelemetry(query: ISearchQuery, endToEndTime: number, complete?: ISearchComplete, err?: SearchError): void {
-		const fileSchemeOnly = query.folderQueries.every(fq => fq.folder.scheme === 'file');
-		const otherSchemeOnly = query.folderQueries.every(fq => fq.folder.scheme !== 'file');
-		const scheme = fileSchemeOnly ? 'file' :
+		const fileSchemeOnly = query.folderQueries.every(fq => fq.folder.scheme === Schemas.file);
+		const otherSchemeOnly = query.folderQueries.every(fq => fq.folder.scheme !== Schemas.file);
+		const scheme = fileSchemeOnly ? Schemas.file :
 			otherSchemeOnly ? 'other' :
 				'mixed';
 
@@ -377,7 +388,8 @@ export class SearchService extends Disposable implements ISearchService {
 						err.code === SearchErrorCode.globParseError ? 'glob' :
 							err.code === SearchErrorCode.invalidLiteral ? 'literal' :
 								err.code === SearchErrorCode.other ? 'other' :
-									'unknown';
+									err.code === SearchErrorCode.canceled ? 'canceled' :
+										'unknown';
 			}
 
 			type TextSearchCompleteClassification = {
@@ -407,14 +419,19 @@ export class SearchService extends Disposable implements ISearchService {
 		}
 	}
 
-	private getLocalResults(query: ITextQuery): ResourceMap<IFileMatch | null> {
+	private getLocalResults(query: ITextQuery): { results: ResourceMap<IFileMatch | null>; limitHit: boolean } {
 		const localResults = new ResourceMap<IFileMatch | null>();
+		let limitHit = false;
 
 		if (query.type === QueryType.Text) {
 			const models = this.modelService.getModels();
 			models.forEach((model) => {
 				const resource = model.uri;
 				if (!resource) {
+					return;
+				}
+
+				if (limitHit) {
 					return;
 				}
 
@@ -444,8 +461,14 @@ export class SearchService extends Disposable implements ISearchService {
 				}
 
 				// Use editor API to find matches
-				const matches = model.findMatches(query.contentPattern.pattern, false, !!query.contentPattern.isRegExp, !!query.contentPattern.isCaseSensitive, query.contentPattern.isWordMatch ? query.contentPattern.wordSeparators! : null, false, query.maxResults);
+				const askMax = typeof query.maxResults === 'number' ? query.maxResults + 1 : undefined;
+				let matches = model.findMatches(query.contentPattern.pattern, false, !!query.contentPattern.isRegExp, !!query.contentPattern.isCaseSensitive, query.contentPattern.isWordMatch ? query.contentPattern.wordSeparators! : null, false, askMax);
 				if (matches.length) {
+					if (askMax && matches.length >= askMax) {
+						limitHit = true;
+						matches = matches.slice(0, askMax - 1);
+					}
+
 					const fileMatch = new FileMatch(resource);
 					localResults.set(resource, fileMatch);
 
@@ -457,7 +480,10 @@ export class SearchService extends Disposable implements ISearchService {
 			});
 		}
 
-		return localResults;
+		return {
+			results: localResults,
+			limitHit
+		};
 	}
 
 	private matches(resource: uri, query: ITextQuery): boolean {
@@ -467,7 +493,7 @@ export class SearchService extends Disposable implements ISearchService {
 	clearCache(cacheKey: string): Promise<void> {
 		const clearPs = [
 			this.diskSearch,
-			...values(this.fileSearchProviders)
+			...Array.from(this.fileSearchProviders.values())
 		].map(provider => provider && provider.clearCache(cacheKey));
 
 		return Promise.all(clearPs)
